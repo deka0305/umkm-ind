@@ -29,13 +29,13 @@ async function initSchema(db: any) {
     CREATE TABLE IF NOT EXISTS categories (id TEXT PRIMARY KEY, name TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS menus (id TEXT PRIMARY KEY, name TEXT NOT NULL, category_id TEXT, sell_price REAL NOT NULL DEFAULT 0, hpp REAL NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, stock INTEGER NOT NULL DEFAULT 0, image_uri TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS ingredients (id TEXT PRIMARY KEY, name TEXT NOT NULL, category TEXT, current_stock REAL NOT NULL DEFAULT 0, unit TEXT NOT NULL, min_stock REAL NOT NULL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS stock_movements (id TEXT PRIMARY KEY, ingredient_id TEXT, type TEXT NOT NULL, qty REAL NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS stock_movements (id TEXT PRIMARY KEY, ingredient_id TEXT, type TEXT NOT NULL, qty REAL NOT NULL, note TEXT, synced INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS customers (id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT, member_tier TEXT NOT NULL DEFAULT 'Bronze', total_orders INTEGER NOT NULL DEFAULT 0, total_spent REAL NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, customer_id TEXT, table_no TEXT, status TEXT NOT NULL DEFAULT 'pending', payment_method TEXT, subtotal REAL NOT NULL DEFAULT 0, tax REAL NOT NULL DEFAULT 0, discount REAL NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0, note TEXT, synced INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS order_items (id TEXT PRIMARY KEY, order_id TEXT, menu_id TEXT, qty INTEGER NOT NULL, price REAL NOT NULL, subtotal REAL NOT NULL);
-    CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY, customer_id TEXT, customer_name TEXT, booking_date TEXT NOT NULL, time TEXT NOT NULL, guests INTEGER NOT NULL DEFAULT 1, table_type TEXT, purpose TEXT, status TEXT NOT NULL DEFAULT 'menunggu');
-    CREATE TABLE IF NOT EXISTS purchase_orders (id TEXT PRIMARY KEY, supplier_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'menunggu', total REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS po_items (id TEXT PRIMARY KEY, po_id TEXT, ingredient_id TEXT, qty REAL NOT NULL, unit TEXT NOT NULL, price REAL NOT NULL);
+    CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY, customer_id TEXT, customer_name TEXT, booking_date TEXT NOT NULL, time TEXT NOT NULL, guests INTEGER NOT NULL DEFAULT 1, table_type TEXT, purpose TEXT, status TEXT NOT NULL DEFAULT 'menunggu', synced INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS purchase_orders (id TEXT PRIMARY KEY, supplier_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'menunggu', total REAL NOT NULL DEFAULT 0, synced INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS po_items (id TEXT PRIMARY KEY, po_id TEXT, ingredient_id TEXT, qty REAL NOT NULL, unit TEXT NOT NULL, price REAL NOT NULL, synced INTEGER NOT NULL DEFAULT 0);
     INSERT OR IGNORE INTO categories (id, name) VALUES ('cat-1','Makanan Berat'),('cat-2','Makanan Ringan'),('cat-3','Minuman'),('cat-4','Dessert');
     INSERT OR IGNORE INTO menus (id, name, category_id, sell_price, hpp, is_active, stock) VALUES
       ('menu-1','Nasi Goreng Spesial','cat-1',18000,9000,1,50),
@@ -93,8 +93,8 @@ function lsUpdate(table: string, updates: Record<string, any>, whereCol: string,
   try { localStorage.setItem(lsKey(table), JSON.stringify(rows)); } catch {}
 }
 
-// Tabel-tabel yang fallback ke localStorage kalau Supabase 404
-const LS_TABLES = new Set(['bookings', 'purchase_orders', 'po_items', 'stock_movements']);
+// Tabel yang belum ada di Supabase (fallback ke localStorage)
+const LS_TABLES = new Set<string>();
 
 // ─── Supabase DB Adapter (web) ────────────────────────────────────────────────
 
@@ -243,11 +243,15 @@ class SupabaseDB {
       const { data } = await supabase.from(table).select('*');
       let rows: any[] = data ?? [];
 
-      // Filter status='selesai' AND date
+      // Filter status AND (optionally) date
       if (sql.includes("status='selesai'") && params[0]) {
         rows = rows.filter(
           (r) => r.status === 'selesai' && (r.created_at ?? '').startsWith(params[0])
         );
+      } else if (sql.includes("status='selesai'")) {
+        rows = rows.filter((r) => r.status === 'selesai');
+      } else if (sql.includes("status='pending'")) {
+        rows = rows.filter((r) => r.status === 'pending');
       }
 
       return {

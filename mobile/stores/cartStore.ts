@@ -25,6 +25,7 @@ interface CartState {
   clearCart: () => void;
   getSubtotal: () => number;
   getTotal: () => number;
+  syncPrices: (menus: Array<{ id: string; name: string; sellPrice: number }>) => void;
 }
 
 export const useCartStore = create<CartState>((set, get) => ({
@@ -67,6 +68,15 @@ export const useCartStore = create<CartState>((set, get) => ({
 
   clearCart: () =>
     set({ items: [], tableNo: '', customerId: '', discount: 0, paymentMethod: 'Tunai' }),
+
+  syncPrices: (menus) =>
+    set((state) => ({
+      items: state.items.map((item) => {
+        const fresh = menus.find((m) => m.id === item.menuId);
+        if (!fresh) return item;
+        return { ...item, name: fresh.name, price: fresh.sellPrice };
+      }),
+    })),
 
   getSubtotal: () => get().items.reduce((sum, i) => sum + i.price * i.qty, 0),
   getTotal: () => {

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { getDB, generateId } from '../lib/db';
+import { syncIngredientsToSupabase } from '../lib/sync';
 
 export interface Ingredient {
   id: string;
@@ -56,6 +57,7 @@ export const useStokStore = create<StokState>((set, get) => ({
       generateId(), ing.name, ing.category, ing.currentStock, ing.unit, ing.minStock
     );
     await get().fetchIngredients();
+    syncIngredientsToSupabase().catch(() => {});
   },
 
   updateIngredient: async (ing) => {
@@ -65,6 +67,7 @@ export const useStokStore = create<StokState>((set, get) => ({
       ing.name, ing.category, ing.currentStock, ing.unit, ing.minStock, ing.id
     );
     await get().fetchIngredients();
+    syncIngredientsToSupabase().catch(() => {});
   },
 
   addMovement: async (ingredientId, type, qty, note = '') => {
@@ -79,5 +82,6 @@ export const useStokStore = create<StokState>((set, get) => ({
       delta, ingredientId
     );
     await get().fetchIngredients();
+    syncIngredientsToSupabase().catch(() => {});
   },
 }));

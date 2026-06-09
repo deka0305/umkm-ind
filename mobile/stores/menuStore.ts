@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { getDB, generateId } from '../lib/db';
+import { useCartStore } from './cartStore';
+import { syncMenusToSupabase } from '../lib/sync';
 
 export interface Menu {
   id: string;
@@ -38,20 +40,19 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     set({ loading: true });
     const db = await getDB();
     const rows = await db.getAllAsync<any>('SELECT * FROM menus ORDER BY name');
-    set({
-      menus: rows.map((r) => ({
-        id: r.id,
-        name: r.name,
-        categoryId: r.category_id,
-        sellPrice: r.sell_price,
-        hpp: r.hpp,
-        isActive: r.is_active === 1,
-        stock: r.stock,
-        imageUri: r.image_uri ?? undefined,
-        createdAt: r.created_at,
-      })),
-      loading: false,
-    });
+    const menus = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      categoryId: r.category_id,
+      sellPrice: r.sell_price,
+      hpp: r.hpp,
+      isActive: r.is_active === 1,
+      stock: r.stock,
+      imageUri: r.image_uri ?? undefined,
+      createdAt: r.created_at,
+    }));
+    set({ menus, loading: false });
+    useCartStore.getState().syncPrices(menus);
   },
 
   fetchCategories: async () => {
@@ -71,6 +72,7 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     const result = await db.runAsync(sql, ...args);
     if (result?.error) throw new Error(result.error.message);
     await get().fetchMenus();
+    syncMenusToSupabase().catch(() => {});
   },
 
   updateMenu: async (menu) => {
@@ -84,6 +86,7 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     args.push(menu.id);
     await db.runAsync(sql, ...args);
     await get().fetchMenus();
+    syncMenusToSupabase().catch(() => {});
   },
 
   toggleActive: async (id) => {
@@ -93,5 +96,6 @@ export const useMenuStore = create<MenuState>((set, get) => ({
       id
     );
     await get().fetchMenus();
+    syncMenusToSupabase().catch(() => {});
   },
 }));

@@ -41,21 +41,70 @@ export default function CartScreen() {
 
   async function checkout() {
     if (items.length === 0) return Alert.alert('Keranjang kosong');
-    // snapshot semua nilai sebelum operasi async agar tidak terpengaruh re-render
-    const snapItems = items.map((i) => ({ menuId: i.menuId, name: i.name, qty: i.qty, price: i.price }));
-    const snapTableNo = tableNo;
-    const snapPayment = paymentMethod;
-    const snapSubtotal = subtotal;
-    const snapTax = tax;
-    const snapDiscount = discount;
-    const snapTotal = total;
     setLoading(true);
     try {
       const db = await getDB();
+
+      // Ambil harga terkini dari database untuk setiap item di cart
+      const freshPrices: Record<string, { name: string; price: number }> = {};
+      await Promise.all(
+        items.map(async (item) => {
+          const row = (await db.getFirstAsync(
+            'SELECT name, sell_price FROM menus WHERE id = ?',
+            item.menuId
+          )) as any;
+          if (row) freshPrices[item.menuId] = { name: row.name, price: row.sell_price };
+        })
+      );
+
+      // Deteksi perubahan harga
+      const changed = items.filter(
+        (i) => freshPrices[i.menuId] && freshPrices[i.menuId].price !== i.price
+      );
+      if (changed.length > 0) {
+        const detail = changed
+          .map((i) => `• ${i.name}: Rp ${i.price.toLocaleString('id-ID')} → Rp ${freshPrices[i.menuId].price.toLocaleString('id-ID')}`)
+          .join('\n');
+        setLoading(false);
+        Alert.alert(
+          'Harga Menu Berubah',
+          `Beberapa harga telah diperbarui:\n\n${detail}\n\nTotal akan dihitung ulang.`,
+          [{ text: 'Lanjutkan', onPress: () => doCheckout(freshPrices) }]
+        );
+        return;
+      }
+
+      await doCheckout(freshPrices);
+    } catch (err) {
+      Alert.alert('Gagal menyimpan order', String(err));
+      setLoading(false);
+    }
+  }
+
+  async function doCheckout(freshPrices: Record<string, { name: string; price: number }>) {
+    setLoading(true);
+    try {
+      const db = await getDB();
+
+      // Pakai harga terkini dari DB (fallback ke harga cart jika menu tidak ditemukan)
+      const snapItems = items.map((i) => ({
+        menuId: i.menuId,
+        name: freshPrices[i.menuId]?.name ?? i.name,
+        qty: i.qty,
+        price: freshPrices[i.menuId]?.price ?? i.price,
+      }));
+      const snapTableNo = tableNo;
+      const snapPayment = paymentMethod;
+      const snapSubtotal = snapItems.reduce((s, i) => s + i.price * i.qty, 0);
+      const ppnRate = ppn / 100;
+      const snapTax = snapSubtotal * ppnRate;
+      const snapDiscount = discount;
+      const snapTotal = snapSubtotal + snapTax - snapDiscount;
+
       const newOrderId = generateId();
       await db.runAsync(
         `INSERT INTO orders (id, table_no, status, payment_method, subtotal, tax, discount, total, note, created_at)
-         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, datetime('now'))`,
+         VALUES (?, ?, 'selesai', ?, ?, ?, ?, ?, ?, datetime('now'))`,
         newOrderId, snapTableNo, snapPayment, snapSubtotal, snapTax, snapDiscount, snapTotal, note
       );
       for (const item of snapItems) {

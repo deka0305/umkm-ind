@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Platform, RefreshControl, Modal, TextInput, Alert,
+  ActivityIndicator, Platform, RefreshControl, Modal, TextInput, Alert, Clipboard,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -9,7 +9,10 @@ import { getDB } from '../../lib/db';
 import { getStokStatus } from '../../stores/stokStore';
 import { formatRupiah } from '../../lib/hpp-calculator';
 import { useSettingsStore } from '../../stores/settingsStore';
+import { useServerStore } from '../../stores/serverStore';
 import { Colors, FontSize, Spacing, Radius } from '../../constants/theme';
+import ReceiptModal from '../../components/ReceiptModal';
+import { ReceiptData } from '../../lib/printReceipt';
 
 interface DashboardData {
   totalOrder: number;
@@ -37,9 +40,94 @@ function todayStr() {
   return new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 }
 
+// Widget yang menampilkan URL server lokal dan status sync
+function ServerStatusWidget() {
+  const { serverRunning, serverURL, syncStatus, lastSync } = useServerStore();
+  if (Platform.OS === 'web') return null;
+
+  const syncLabel: Record<string, { text: string; color: string; icon: any }> = {
+    idle:    { text: 'Tersinkron',   color: Colors.primary, icon: 'cloud-done-outline'    },
+    syncing: { text: 'Menyinkron…', color: Colors.info,    icon: 'cloud-upload-outline'  },
+    error:   { text: 'Sync gagal',  color: Colors.danger,  icon: 'cloud-offline-outline' },
+    offline: { text: 'Offline',     color: Colors.amber,   icon: 'cloud-offline-outline' },
+  };
+  const sc = syncLabel[syncStatus] ?? syncLabel.idle;
+
+  function copyURL() {
+    if (serverURL) {
+      Clipboard.setString(serverURL);
+      Alert.alert('URL disalin!', serverURL);
+    }
+  }
+
+  return (
+    <View style={sw.container}>
+      {/* Server lokal */}
+      <View style={sw.row}>
+        <Ionicons name={serverRunning ? 'wifi' : 'wifi-outline'} size={16} color={serverRunning ? Colors.primary : Colors.textMuted} />
+        <Text style={sw.label}>Server Lokal</Text>
+        {serverRunning && serverURL ? (
+          <TouchableOpacity onPress={copyURL} style={sw.urlBtn}>
+            <Text style={sw.url}>{serverURL}</Text>
+            <Ionicons name="copy-outline" size={13} color={Colors.primary} />
+          </TouchableOpacity>
+        ) : (
+          <Text style={[sw.url, { color: Colors.textMuted }]}>Tidak aktif</Text>
+        )}
+      </View>
+
+      {/* Divider */}
+      <View style={sw.divider} />
+
+      {/* Sync Supabase */}
+      <View style={sw.row}>
+        <Ionicons name={sc.icon} size={16} color={sc.color} />
+        <Text style={sw.label}>Supabase</Text>
+        <Text style={[sw.syncText, { color: sc.color }]}>{sc.text}</Text>
+        {lastSync && (
+          <Text style={sw.lastSync}>
+            {new Date(lastSync).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+          </Text>
+        )}
+      </View>
+
+      {serverRunning && serverURL && (
+        <Text style={sw.hint}>
+          Buka <Text style={{ color: Colors.primary }}>{serverURL}</Text> di browser perangkat lain (WiFi sama)
+        </Text>
+      )}
+    </View>
+  );
+}
+
+const sw = StyleSheet.create({
+  container: {
+    backgroundColor: Colors.white,
+    borderRadius: Radius.md,
+    padding: Spacing.md,
+    marginHorizontal: Spacing.md,
+    marginTop: Spacing.sm,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: '#e8f7f2',
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  row:      { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  divider:  { height: 1, backgroundColor: '#f0f0f0', marginVertical: 7 },
+  label:    { fontSize: 12, color: Colors.textSecondary, fontWeight: '500', marginRight: 2 },
+  url:      { fontSize: 12, color: Colors.primary, fontWeight: '700', flex: 1 },
+  urlBtn:   { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
+  syncText: { fontSize: 12, fontWeight: '600', flex: 1 },
+  lastSync: { fontSize: 11, color: Colors.textMuted },
+  hint:     { fontSize: 11, color: Colors.textMuted, marginTop: 6, lineHeight: 15 },
+});
+
 export default function DashboardScreen() {
   const router = useRouter();
-  const { ppn, namaUsaha, save: saveSettings } = useSettingsStore();
+  const { ppn, namaUsaha, alamat, noTelp, save: saveSettings } = useSettingsStore();
   const [data, setData] = useState<DashboardData>({
     totalOrder: 0, pendapatan: 0, orderPending: 0, stokKritis: [], orderTerbaru: [], topMenu: [],
   });
@@ -48,6 +136,102 @@ export default function DashboardScreen() {
   const [showSettings, setShowSettings] = useState(false);
   const [formPpn, setFormPpn] = useState(String(ppn));
   const [formNama, setFormNama] = useState(namaUsaha);
+
+  // ── Detail stok ───────────────────────────────────────────────────────────
+  const [stokModal, setStokModal] = useState(false);
+  const [stokDetail, setStokDetail] = useState<{
+    id: string; name: string; category: string;
+    currentStock: number; unit: string; minStock: number;
+    movements: Array<{ type: string; qty: number; note: string; createdAt: string }>;
+  } | null>(null);
+  const [loadingStok, setLoadingStok] = useState(false);
+
+  async function openStokDetail(ingredientId: string) {
+    setLoadingStok(true);
+    try {
+      const db = await getDB();
+      const [ing, moves] = await Promise.all([
+        db.getFirstAsync('SELECT * FROM ingredients WHERE id = ?', ingredientId),
+        db.getAllAsync(
+          'SELECT * FROM stock_movements WHERE ingredient_id = ? ORDER BY created_at DESC LIMIT 20',
+          ingredientId
+        ),
+      ]);
+      if (!ing) return;
+      setStokDetail({
+        id: ing.id,
+        name: ing.name,
+        category: ing.category || '-',
+        currentStock: ing.current_stock,
+        unit: ing.unit,
+        minStock: ing.min_stock,
+        movements: (moves as any[]).map((m) => ({
+          type: m.type,
+          qty: m.qty,
+          note: m.note || '-',
+          createdAt: m.created_at,
+        })),
+      });
+      setStokModal(true);
+    } catch {
+      Alert.alert('Gagal', 'Tidak dapat memuat data stok');
+    } finally {
+      setLoadingStok(false);
+    }
+  }
+
+  // ── Detail order & struk ───────────────────────────────────────────────────
+  const [receiptVisible, setReceiptVisible] = useState(false);
+  const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
+  const [loadingReceipt, setLoadingReceipt] = useState(false);
+
+  async function openOrderDetail(orderId: string) {
+    setLoadingReceipt(true);
+    try {
+      const db = await getDB();
+
+      const [fullOrder, orderItems, allMenus] = await Promise.all([
+        db.getFirstAsync('SELECT * FROM orders WHERE id = ?', orderId),
+        db.getAllAsync('SELECT * FROM order_items WHERE order_id = ?', orderId),
+        db.getAllAsync('SELECT id, name FROM menus'),
+      ]);
+
+      if (!fullOrder) { Alert.alert('Data tidak ditemukan'); return; }
+
+      const menuMap: Record<string, string> = {};
+      for (const m of allMenus) menuMap[m.id] = m.name;
+
+      const receipt: ReceiptData = {
+        orderId: fullOrder.id.slice(0, 8).toUpperCase(),
+        items: orderItems.map((i: any) => ({
+          name: menuMap[i.menu_id] || 'Menu',
+          qty: i.qty,
+          price: i.price,
+        })),
+        tableNo: fullOrder.table_no || '-',
+        paymentMethod: fullOrder.payment_method || '-',
+        subtotal: fullOrder.subtotal || 0,
+        tax: fullOrder.tax || 0,
+        ppn,
+        discount: fullOrder.discount || 0,
+        total: fullOrder.total || 0,
+        namaUsaha,
+        alamat: alamat || '',
+        noTelp: noTelp || '',
+        createdAt: new Date(fullOrder.created_at).toLocaleString('id-ID', {
+          day: '2-digit', month: 'short', year: 'numeric',
+          hour: '2-digit', minute: '2-digit',
+        }),
+      };
+
+      setReceiptData(receipt);
+      setReceiptVisible(true);
+    } catch (e) {
+      Alert.alert('Gagal', 'Tidak dapat memuat detail order');
+    } finally {
+      setLoadingReceipt(false);
+    }
+  }
 
   function openSettings() {
     setFormPpn(String(ppn));
@@ -63,6 +247,16 @@ export default function DashboardScreen() {
     }
     saveSettings({ ppn: parsed, namaUsaha: formNama.trim() || 'UMKM Pro' });
     setShowSettings(false);
+  }
+
+  async function markSelesai(orderId: string) {
+    try {
+      const db = await getDB();
+      await db.runAsync(`UPDATE orders SET status = ? WHERE id = ?`, 'selesai', orderId);
+      await loadData();
+    } catch {
+      Alert.alert('Gagal', 'Tidak dapat mengubah status order');
+    }
   }
 
   const loadData = useCallback(async () => {
@@ -159,6 +353,9 @@ export default function DashboardScreen() {
         </View>
       </View>
 
+      {/* ── Server & Sync Status ──────────────────────── */}
+      <ServerStatusWidget />
+
       {/* ── Quick Actions ──────────────────────────────── */}
       <View style={s.section}>
         <Text style={s.sectionTitle}>Aksi Cepat</Text>
@@ -225,7 +422,12 @@ export default function DashboardScreen() {
               ? Math.min(100, (item.currentStock / item.minStock) * 100)
               : 0;
             return (
-              <View key={item.id} style={s.stokRow}>
+              <TouchableOpacity
+                key={item.id}
+                style={s.stokRow}
+                onPress={() => openStokDetail(item.id)}
+                activeOpacity={0.7}
+              >
                 <View style={[s.stokIcon, { backgroundColor: bg }]}>
                   <Ionicons name={isHabis ? 'close-circle' : 'warning'} size={16} color={color} />
                 </View>
@@ -238,7 +440,8 @@ export default function DashboardScreen() {
                     <View style={[s.stokBarFill, { width: `${pct}%` as any, backgroundColor: color }]} />
                   </View>
                 </View>
-              </View>
+                <Ionicons name="chevron-forward" size={14} color={color} style={{ marginLeft: 4 }} />
+              </TouchableOpacity>
             );
           })}
         </View>
@@ -273,7 +476,12 @@ export default function DashboardScreen() {
             const cfg = STATUS_CFG[order.status] ?? { label: order.status, color: Colors.textMuted, bg: Colors.background, icon: 'ellipse-outline' };
             const timeStr = (order.createdAt ?? '').slice(11, 16);
             return (
-              <View key={order.id} style={[s.orderRow, idx === 0 && { borderTopWidth: 0 }]}>
+              <TouchableOpacity
+                key={order.id}
+                style={[s.orderRow, idx === 0 && { borderTopWidth: 0 }]}
+                onPress={() => openOrderDetail(order.id)}
+                activeOpacity={0.7}
+              >
                 <View style={[s.orderIconWrap, { backgroundColor: cfg.bg }]}>
                   <Ionicons name={cfg.icon} size={16} color={cfg.color} />
                 </View>
@@ -283,11 +491,22 @@ export default function DashboardScreen() {
                 </View>
                 <View style={{ alignItems: 'flex-end', gap: 3 }}>
                   <Text style={s.orderTotal}>{formatRupiah(order.total)}</Text>
-                  <View style={[s.badge, { backgroundColor: cfg.bg }]}>
-                    <Text style={[s.badgeText, { color: cfg.color }]}>{cfg.label}</Text>
-                  </View>
+                  {order.status !== 'selesai' && order.status !== 'batal' ? (
+                    <TouchableOpacity
+                      style={s.selesaiBtn}
+                      onPress={(e) => { e.stopPropagation?.(); markSelesai(order.id); }}
+                    >
+                      <Ionicons name="checkmark" size={11} color={Colors.white} />
+                      <Text style={s.selesaiBtnText}>Selesai</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <View style={[s.badge, { backgroundColor: cfg.bg }]}>
+                      <Text style={[s.badgeText, { color: cfg.color }]}>{cfg.label}</Text>
+                    </View>
+                  )}
                 </View>
-              </View>
+                <Ionicons name="chevron-forward" size={14} color={Colors.textMuted} style={{ marginLeft: 2 }} />
+              </TouchableOpacity>
             );
           })
         )}
@@ -307,6 +526,129 @@ export default function DashboardScreen() {
       </TouchableOpacity>
 
     </ScrollView>
+
+    {/* ── Loading overlay stok ────────────────────────── */}
+    {loadingStok && (
+      <View style={s.loadingOverlay}>
+        <ActivityIndicator size="large" color={Colors.primary} />
+        <Text style={{ color: Colors.white, marginTop: 8, fontSize: FontSize.sm }}>Memuat stok...</Text>
+      </View>
+    )}
+
+    {/* ── Modal Detail Stok ────────────────────────────── */}
+    <Modal visible={stokModal} animationType="slide" transparent onRequestClose={() => setStokModal(false)}>
+      <View style={s.settingsOverlay}>
+        <View style={[s.settingsSheet, { maxHeight: '80%' }]}>
+          <View style={s.settingsHandle} />
+
+          {/* Header */}
+          <View style={s.settingsHeader}>
+            <View style={[s.settingsIconWrap, { backgroundColor: stokDetail && stokDetail.currentStock <= 0 ? Colors.dangerLight : Colors.amberLight }]}>
+              <Ionicons name="layers" size={18} color={stokDetail && stokDetail.currentStock <= 0 ? Colors.danger : Colors.amber} />
+            </View>
+            <Text style={s.settingsTitle}>{stokDetail?.name ?? ''}</Text>
+            <TouchableOpacity style={s.settingsClose} onPress={() => setStokModal(false)}>
+              <Ionicons name="close" size={18} color={Colors.textSecondary} />
+            </TouchableOpacity>
+          </View>
+
+          {stokDetail && (
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {/* Kartu info utama */}
+              <View style={sd.infoGrid}>
+                <View style={sd.infoCard}>
+                  <Text style={sd.infoVal}>{stokDetail.currentStock}</Text>
+                  <Text style={sd.infoLbl}>{stokDetail.unit} tersisa</Text>
+                </View>
+                <View style={sd.infoCard}>
+                  <Text style={[sd.infoVal, { color: Colors.amber }]}>{stokDetail.minStock}</Text>
+                  <Text style={sd.infoLbl}>{stokDetail.unit} minimum</Text>
+                </View>
+                <View style={sd.infoCard}>
+                  <Text style={sd.infoVal}>{stokDetail.category}</Text>
+                  <Text style={sd.infoLbl}>Kategori</Text>
+                </View>
+              </View>
+
+              {/* Progress bar */}
+              {(() => {
+                const pct = stokDetail.minStock > 0
+                  ? Math.min(100, Math.round((stokDetail.currentStock / (stokDetail.minStock * 2)) * 100))
+                  : 100;
+                const statusStr = stokDetail.currentStock <= 0 ? 'Habis'
+                  : stokDetail.currentStock <= stokDetail.minStock ? 'Kritis'
+                  : stokDetail.currentStock <= stokDetail.minStock * 1.5 ? 'Rendah' : 'Aman';
+                const barColor = statusStr === 'Aman' ? Colors.primary
+                  : statusStr === 'Rendah' ? Colors.amber : Colors.danger;
+                return (
+                  <View style={sd.progSection}>
+                    <View style={sd.progHeader}>
+                      <Text style={sd.progLabel}>Level Stok</Text>
+                      <View style={[sd.statusBadge, { backgroundColor: barColor + '20' }]}>
+                        <Text style={[sd.statusText, { color: barColor }]}>{statusStr}</Text>
+                      </View>
+                    </View>
+                    <View style={sd.progTrack}>
+                      <View style={[sd.progFill, { width: `${pct}%` as any, backgroundColor: barColor }]} />
+                    </View>
+                    <Text style={sd.progHint}>{pct}% dari level aman</Text>
+                  </View>
+                );
+              })()}
+
+              {/* Riwayat pergerakan */}
+              <View style={sd.histSection}>
+                <Text style={sd.histTitle}>Riwayat Pergerakan</Text>
+                {stokDetail.movements.length === 0 ? (
+                  <Text style={sd.histEmpty}>Belum ada pergerakan stok</Text>
+                ) : (
+                  stokDetail.movements.map((m, i) => {
+                    const isIn = m.type === 'masuk';
+                    return (
+                      <View key={i} style={sd.histRow}>
+                        <View style={[sd.histIcon, { backgroundColor: isIn ? Colors.primaryLight : Colors.dangerLight }]}>
+                          <Ionicons name={isIn ? 'arrow-down-circle' : 'arrow-up-circle'} size={16} color={isIn ? Colors.primary : Colors.danger} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={sd.histNote}>{m.note}</Text>
+                          <Text style={sd.histDate}>{(m.createdAt ?? '').slice(0, 16).replace('T', ' ')}</Text>
+                        </View>
+                        <Text style={[sd.histQty, { color: isIn ? Colors.primary : Colors.danger }]}>
+                          {isIn ? '+' : '-'}{m.qty} {stokDetail.unit}
+                        </Text>
+                      </View>
+                    );
+                  })
+                )}
+              </View>
+            </ScrollView>
+          )}
+
+          <TouchableOpacity
+            style={[s.settingsSaveBtn, { backgroundColor: Colors.info }]}
+            onPress={() => { setStokModal(false); router.push('/(tabs)/stok'); }}
+          >
+            <Ionicons name="create-outline" size={18} color={Colors.white} />
+            <Text style={s.settingsSaveBtnText}>Kelola Stok</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+
+    {/* ── Loading overlay saat fetch detail order ─────── */}
+    {loadingReceipt && (
+      <View style={s.loadingOverlay}>
+        <ActivityIndicator size="large" color={Colors.primary} />
+        <Text style={{ color: Colors.white, marginTop: 8, fontSize: FontSize.sm }}>Memuat detail...</Text>
+      </View>
+    )}
+
+    {/* ── Struk / Detail Order ────────────────────────── */}
+    <ReceiptModal
+      visible={receiptVisible}
+      data={receiptData}
+      onClose={() => { setReceiptVisible(false); setReceiptData(null); }}
+    />
 
     {/* ── Modal Pengaturan ────────────────────────────── */}
     <Modal visible={showSettings} animationType="slide" transparent>
@@ -511,6 +853,12 @@ const s = StyleSheet.create({
   orderTotal: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.textPrimary },
   badge: { borderRadius: Radius.full, paddingHorizontal: 8, paddingVertical: 2 },
   badgeText: { fontSize: 10, fontWeight: '700' },
+  selesaiBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    backgroundColor: Colors.primary, borderRadius: Radius.full,
+    paddingHorizontal: 8, paddingVertical: 3,
+  },
+  selesaiBtnText: { fontSize: 10, fontWeight: '700', color: Colors.white },
 
   /* Empty state */
   emptyBox: { alignItems: 'center', paddingVertical: Spacing.lg, gap: 8 },
@@ -591,6 +939,15 @@ const s = StyleSheet.create({
   ppnChipText: { fontSize: FontSize.sm, color: Colors.textSecondary, fontWeight: '600' },
   ppnChipTextActive: { color: Colors.white },
 
+  /* Loading overlay */
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 99,
+  },
+
   /* Save button */
   settingsSaveBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
@@ -598,4 +955,35 @@ const s = StyleSheet.create({
     padding: Spacing.md, marginTop: Spacing.lg,
   },
   settingsSaveBtnText: { color: Colors.white, fontWeight: '700', fontSize: FontSize.base },
+});
+
+const sd = StyleSheet.create({
+  infoGrid: { flexDirection: 'row', gap: Spacing.sm, paddingHorizontal: Spacing.md, marginBottom: Spacing.sm },
+  infoCard: {
+    flex: 1, backgroundColor: Colors.background, borderRadius: Radius.sm,
+    padding: Spacing.sm, alignItems: 'center',
+  },
+  infoVal: { fontSize: FontSize.lg, fontWeight: '800', color: Colors.textPrimary },
+  infoLbl: { fontSize: 10, color: Colors.textMuted, marginTop: 2, textAlign: 'center' },
+
+  progSection: { paddingHorizontal: Spacing.md, marginBottom: Spacing.md },
+  progHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  progLabel: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textSecondary },
+  statusBadge: { borderRadius: 99, paddingHorizontal: 10, paddingVertical: 3 },
+  statusText: { fontSize: 11, fontWeight: '700' },
+  progTrack: { height: 8, backgroundColor: Colors.border, borderRadius: 4, overflow: 'hidden' },
+  progFill: { height: '100%', borderRadius: 4 },
+  progHint: { fontSize: 11, color: Colors.textMuted, marginTop: 4 },
+
+  histSection: { paddingHorizontal: Spacing.md, paddingBottom: Spacing.md },
+  histTitle: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.textPrimary, marginBottom: Spacing.sm },
+  histEmpty: { fontSize: FontSize.sm, color: Colors.textMuted, textAlign: 'center', paddingVertical: Spacing.md },
+  histRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    paddingVertical: 8, borderTopWidth: 0.5, borderTopColor: Colors.border,
+  },
+  histIcon: { width: 30, height: 30, borderRadius: 8, justifyContent: 'center', alignItems: 'center' },
+  histNote: { fontSize: FontSize.sm, color: Colors.textPrimary, fontWeight: '500' },
+  histDate: { fontSize: 11, color: Colors.textMuted, marginTop: 1 },
+  histQty: { fontSize: FontSize.sm, fontWeight: '700' },
 });
