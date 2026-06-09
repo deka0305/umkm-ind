@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "UMKM Pro",
+    "slug": "umkm-pro",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.umkmpro.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#1D9E75"
+      },
+      "package": "com.umkmpro.app",
+      "permissions": [
+        "BLUETOOTH",
+        "BLUETOOTH_ADMIN",
+        "BLUETOOTH_CONNECT",
+        "BLUETOOTH_SCAN"
+      ]
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "scheme": "umkmpro",
+    "web": {
+      "bundler": "metro",
+      "output": "single-page"
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "63dc529d-141e-4be5-89da-349706c9f27f"
+      }
+    }
+  }
+}
