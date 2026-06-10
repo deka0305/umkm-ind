@@ -1,7 +1,15 @@
+import { Platform } from 'react-native';
 import { create } from 'zustand';
 import { getDB, generateId } from '../lib/db';
 import { useCartStore } from './cartStore';
-import { syncMenusToSupabase } from '../lib/sync';
+import { notifyDataChange } from '../lib/sync';
+import { supabase } from '../lib/supabase';
+import { checkInternetConnection } from '../lib/networkUtils';
+import { uploadMenuImage } from '../lib/imagePicker';
+
+function isLocalUri(uri: string): boolean {
+  return !uri.startsWith('http');
+}
 
 export interface Menu {
   id: string;
@@ -63,21 +71,67 @@ export const useMenuStore = create<MenuState>((set, get) => ({
 
   createMenu: async (menu) => {
     const db = await getDB();
-    const img = menu.imageUri ?? null;
+    const id  = generateId();
+
+    // Upload gambar ke Supabase Storage jika URI lokal dan online
+    let img: string | null = menu.imageUri ?? null;
+    if (img && isLocalUri(img)) {
+      const online = await checkInternetConnection();
+      if (online) {
+        const uploaded = await uploadMenuImage(img, id);
+        if (uploaded) {
+          img = uploaded;
+        } else if (Platform.OS === 'web') {
+          img = null; // blob URL tidak bisa disimpan di Supabase
+        }
+      } else if (Platform.OS === 'web') {
+        img = null; // offline di web: blob URL tidak persisten
+      }
+    }
+
     const sql = img !== null
       ? 'INSERT INTO menus (id, name, category_id, sell_price, hpp, is_active, stock, image_uri) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       : 'INSERT INTO menus (id, name, category_id, sell_price, hpp, is_active, stock) VALUES (?, ?, ?, ?, ?, ?, ?)';
-    const args: any[] = [generateId(), menu.name, menu.categoryId, menu.sellPrice, menu.hpp, menu.isActive ? 1 : 0, menu.stock];
+    const args: any[] = [id, menu.name, menu.categoryId, menu.sellPrice, menu.hpp, menu.isActive ? 1 : 0, menu.stock];
     if (img !== null) args.push(img);
     const result = await db.runAsync(sql, ...args);
     if (result?.error) throw new Error(result.error.message);
     await get().fetchMenus();
-    syncMenusToSupabase().catch(() => {});
+    notifyDataChange();
+    if (Platform.OS !== 'web') {
+      checkInternetConnection().then(async (online) => {
+        if (!online) return;
+        try {
+          await supabase.from('menus').upsert({
+            id, name: menu.name, category_id: menu.categoryId,
+            sell_price: menu.sellPrice, hpp: menu.hpp,
+            is_active: menu.isActive ? 1 : 0, stock: menu.stock,
+            image_uri: img,
+          });
+        } catch {}
+      });
+    }
   },
 
   updateMenu: async (menu) => {
     const db = await getDB();
-    const img = menu.imageUri ?? null;
+
+    // Upload gambar ke Supabase Storage jika URI lokal dan online
+    let img: string | null = menu.imageUri ?? null;
+    if (img && isLocalUri(img)) {
+      const online = await checkInternetConnection();
+      if (online) {
+        const uploaded = await uploadMenuImage(img, menu.id);
+        if (uploaded) {
+          img = uploaded;
+        } else if (Platform.OS === 'web') {
+          img = null; // blob URL tidak bisa disimpan di Supabase
+        }
+      } else if (Platform.OS === 'web') {
+        img = null; // offline di web: blob URL tidak persisten
+      }
+    }
+
     const sql = img !== null
       ? 'UPDATE menus SET name=?, category_id=?, sell_price=?, hpp=?, is_active=?, stock=?, image_uri=? WHERE id=?'
       : 'UPDATE menus SET name=?, category_id=?, sell_price=?, hpp=?, is_active=?, stock=? WHERE id=?';
@@ -86,7 +140,20 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     args.push(menu.id);
     await db.runAsync(sql, ...args);
     await get().fetchMenus();
-    syncMenusToSupabase().catch(() => {});
+    notifyDataChange();
+    if (Platform.OS !== 'web') {
+      checkInternetConnection().then(async (online) => {
+        if (!online) return;
+        try {
+          await supabase.from('menus').upsert({
+            id: menu.id, name: menu.name, category_id: menu.categoryId,
+            sell_price: menu.sellPrice, hpp: menu.hpp,
+            is_active: menu.isActive ? 1 : 0, stock: menu.stock,
+            image_uri: img,
+          });
+        } catch {}
+      });
+    }
   },
 
   toggleActive: async (id) => {
@@ -96,6 +163,15 @@ export const useMenuStore = create<MenuState>((set, get) => ({
       id
     );
     await get().fetchMenus();
-    syncMenusToSupabase().catch(() => {});
+    notifyDataChange();
+    if (Platform.OS !== 'web') {
+      checkInternetConnection().then(async (online) => {
+        if (!online) return;
+        try {
+          const row = await db.getFirstAsync('SELECT * FROM menus WHERE id = ?', id) as any;
+          if (row) await supabase.from('menus').upsert(row);
+        } catch {}
+      });
+    }
   },
 }));

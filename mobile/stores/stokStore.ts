@@ -1,6 +1,9 @@
+import { Platform } from 'react-native';
 import { create } from 'zustand';
 import { getDB, generateId } from '../lib/db';
-import { syncIngredientsToSupabase } from '../lib/sync';
+import { notifyDataChange } from '../lib/sync';
+import { supabase } from '../lib/supabase';
+import { checkInternetConnection } from '../lib/networkUtils';
 
 export interface Ingredient {
   id: string;
@@ -34,7 +37,7 @@ export const useStokStore = create<StokState>((set, get) => ({
   loading: false,
 
   fetchIngredients: async () => {
-    set({ loading: true });
+    if (get().ingredients.length === 0) set({ loading: true });
     const db = await getDB();
     const rows = await db.getAllAsync<any>('SELECT * FROM ingredients ORDER BY name');
     set({
@@ -52,12 +55,24 @@ export const useStokStore = create<StokState>((set, get) => ({
 
   createIngredient: async (ing) => {
     const db = await getDB();
+    const id = generateId();
     await db.runAsync(
       'INSERT INTO ingredients (id, name, category, current_stock, unit, min_stock) VALUES (?, ?, ?, ?, ?, ?)',
-      generateId(), ing.name, ing.category, ing.currentStock, ing.unit, ing.minStock
+      id, ing.name, ing.category, ing.currentStock, ing.unit, ing.minStock
     );
     await get().fetchIngredients();
-    syncIngredientsToSupabase().catch(() => {});
+    notifyDataChange();
+    if (Platform.OS !== 'web') {
+      checkInternetConnection().then(async (online) => {
+        if (!online) return;
+        try {
+          await supabase.from('ingredients').upsert({
+            id, name: ing.name, category: ing.category,
+            current_stock: ing.currentStock, unit: ing.unit, min_stock: ing.minStock,
+          });
+        } catch {}
+      });
+    }
   },
 
   updateIngredient: async (ing) => {
@@ -67,14 +82,27 @@ export const useStokStore = create<StokState>((set, get) => ({
       ing.name, ing.category, ing.currentStock, ing.unit, ing.minStock, ing.id
     );
     await get().fetchIngredients();
-    syncIngredientsToSupabase().catch(() => {});
+    notifyDataChange();
+    if (Platform.OS !== 'web') {
+      checkInternetConnection().then(async (online) => {
+        if (!online) return;
+        try {
+          await supabase.from('ingredients').upsert({
+            id: ing.id, name: ing.name, category: ing.category,
+            current_stock: ing.currentStock, unit: ing.unit, min_stock: ing.minStock,
+          });
+        } catch {}
+      });
+    }
   },
 
   addMovement: async (ingredientId, type, qty, note = '') => {
     const db = await getDB();
+    const movId = generateId();
+    const now   = new Date().toISOString();
     await db.runAsync(
-      'INSERT INTO stock_movements (id, ingredient_id, type, qty, note, created_at) VALUES (?, ?, ?, ?, ?, datetime("now"))',
-      generateId(), ingredientId, type, qty, note
+      'INSERT INTO stock_movements (id, ingredient_id, type, qty, note, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      movId, ingredientId, type, qty, note, now
     );
     const delta = type === 'masuk' ? qty : -qty;
     await db.runAsync(
@@ -82,6 +110,20 @@ export const useStokStore = create<StokState>((set, get) => ({
       delta, ingredientId
     );
     await get().fetchIngredients();
-    syncIngredientsToSupabase().catch(() => {});
+    notifyDataChange();
+    if (Platform.OS !== 'web') {
+      checkInternetConnection().then(async (online) => {
+        if (!online) return;
+        try {
+          const row = await db.getFirstAsync('SELECT * FROM ingredients WHERE id = ?', ingredientId) as any;
+          await Promise.all([
+            supabase.from('stock_movements').upsert({
+              id: movId, ingredient_id: ingredientId, type, qty, note, created_at: now,
+            }),
+            row ? supabase.from('ingredients').upsert(row) : Promise.resolve(),
+          ]);
+        } catch {}
+      });
+    }
   },
 }));

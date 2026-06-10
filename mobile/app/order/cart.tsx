@@ -5,9 +5,13 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { Platform } from 'react-native';
 import { useCartStore } from '../../stores/cartStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { getDB, generateId } from '../../lib/db';
+import { notifyDataChange } from '../../lib/sync';
+import { supabase } from '../../lib/supabase';
+import { checkInternetConnection } from '../../lib/networkUtils';
 import { formatRupiah } from '../../lib/hpp-calculator';
 import { ReceiptData } from '../../lib/printReceipt';
 import ReceiptModal from '../../components/ReceiptModal';
@@ -86,52 +90,82 @@ export default function CartScreen() {
     try {
       const db = await getDB();
 
-      // Pakai harga terkini dari DB (fallback ke harga cart jika menu tidak ditemukan)
       const snapItems = items.map((i) => ({
         menuId: i.menuId,
         name: freshPrices[i.menuId]?.name ?? i.name,
         qty: i.qty,
         price: freshPrices[i.menuId]?.price ?? i.price,
       }));
-      const snapTableNo = tableNo;
-      const snapPayment = paymentMethod;
+      const snapTableNo  = tableNo;
+      const snapPayment  = paymentMethod;
       const snapSubtotal = snapItems.reduce((s, i) => s + i.price * i.qty, 0);
-      const ppnRate = ppn / 100;
-      const snapTax = snapSubtotal * ppnRate;
+      const snapTax      = snapSubtotal * (ppn / 100);
       const snapDiscount = discount;
-      const snapTotal = snapSubtotal + snapTax - snapDiscount;
+      const snapTotal    = snapSubtotal + snapTax - snapDiscount;
+      const now          = new Date().toISOString();
 
+      // Cek koneksi sebelum tulis (hanya native — web pakai SupabaseDB langsung)
+      const online = Platform.OS !== 'web' && await checkInternetConnection();
+
+      // ── 1. Simpan ke SQLite (selalu, cepat, offline-first) ──────────────────
       const newOrderId = generateId();
       await db.runAsync(
-        `INSERT INTO orders (id, table_no, status, payment_method, subtotal, tax, discount, total, note, created_at)
-         VALUES (?, ?, 'selesai', ?, ?, ?, ?, ?, ?, datetime('now'))`,
-        newOrderId, snapTableNo, snapPayment, snapSubtotal, snapTax, snapDiscount, snapTotal, note
+        `INSERT INTO orders
+           (id, table_no, status, payment_method, subtotal, tax, discount, total, note, synced, created_at)
+         VALUES (?, ?, 'selesai', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        newOrderId, snapTableNo, snapPayment,
+        snapSubtotal, snapTax, snapDiscount, snapTotal,
+        note || null, online ? 1 : 0, now
       );
-      for (const item of snapItems) {
+
+      // Simpan item dengan ID tetap agar bisa di-upsert ke Supabase dengan ID sama
+      const snapItemsWithId = snapItems.map((i) => ({
+        ...i,
+        itemId: generateId(),
+      }));
+      for (const item of snapItemsWithId) {
         await db.runAsync(
-          `INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal) VALUES (?, ?, ?, ?, ?, ?)`,
-          generateId(), newOrderId, item.menuId, item.qty, item.price, item.price * item.qty
+          `INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          item.itemId, newOrderId, item.menuId, item.qty, item.price, item.price * item.qty
         );
       }
+
+      // ── 2. Update UI seketika (tidak tunggu Supabase) ────────────────────────
       const shortId = newOrderId.slice(-6).toUpperCase();
       setOrderId(shortId);
       setReceiptData({
-        orderId: shortId,
-        items: snapItems,
-        tableNo: snapTableNo,
-        paymentMethod: snapPayment,
-        subtotal: snapSubtotal,
-        tax: snapTax,
-        ppn,
-        discount: snapDiscount,
-        total: snapTotal,
-        namaUsaha,
-        alamat,
-        noTelp,
+        orderId: shortId, items: snapItems, tableNo: snapTableNo,
+        paymentMethod: snapPayment, subtotal: snapSubtotal, tax: snapTax,
+        ppn, discount: snapDiscount, total: snapTotal,
+        namaUsaha, alamat, noTelp,
         createdAt: new Date().toLocaleString('id-ID'),
       });
       clearCart();
+      notifyDataChange();
       setShowSuccess(true);
+
+      // ── 3. Tulis ke Supabase di background (jika ada internet) ───────────────
+      // Web sudah tulis langsung via SupabaseDB — hanya native yang perlu ini
+      if (online) {
+        Promise.all([
+          supabase.from('orders').upsert({
+            id: newOrderId, table_no: snapTableNo, status: 'selesai',
+            payment_method: snapPayment, subtotal: snapSubtotal, tax: snapTax,
+            discount: snapDiscount, total: snapTotal,
+            note: note || null, created_at: now,
+          }),
+          supabase.from('order_items').upsert(
+            snapItemsWithId.map((i) => ({
+              id: i.itemId, order_id: newOrderId, menu_id: i.menuId,
+              qty: i.qty, price: i.price, subtotal: i.price * i.qty,
+            }))
+          ),
+        ]).catch(() => {
+          // Gagal → set synced=0 agar periodic sync mengambil alih
+          db.runAsync('UPDATE orders SET synced = 0 WHERE id = ?', newOrderId).catch(() => {});
+        });
+      }
     } catch (err) {
       Alert.alert('Gagal menyimpan order', String(err));
     } finally {

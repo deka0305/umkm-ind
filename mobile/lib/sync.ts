@@ -30,6 +30,23 @@ export function onPullComplete(cb: () => void): () => void {
   return () => _pullListeners.delete(cb);
 }
 
+/** Picu semua listener setelah mutasi lokal (order baru, stok berubah, dll).
+ *  Sama seperti efek pull selesai — semua screen yang subscribe akan refresh. */
+export function notifyDataChange(): void {
+  _pullListeners.forEach((cb) => cb());
+}
+
+/** Sync manual — dipanggil saat user tekan tombol Sinkron.
+ *  Native: pull dari Supabase + push pending ke Supabase.
+ *  Web: cukup notify agar semua screen re-fetch dari Supabase via SupabaseDB. */
+export async function manualSync(): Promise<boolean> {
+  if (Platform.OS === 'web') {
+    _pullListeners.forEach((cb) => cb());
+    return true;
+  }
+  return syncAll();
+}
+
 function setStatus(s: SyncStatus) {
   _status = s;
   _listeners.forEach((cb) => cb(s, _lastSync));
@@ -302,4 +319,34 @@ export function stopAutoSync(): void {
     clearInterval(_autoSyncTimer);
     _autoSyncTimer = null;
   }
+}
+
+// ─── Push-sync ringan (hanya kirim data pending, tidak pull) ──────────────────
+// Jauh lebih cepat dari syncAll() karena tidak menarik semua tabel dari Supabase.
+// Cocok untuk interval pendek (3–5 detik) sebagai jembatan jika dual-write gagal.
+
+let _pushTimer: ReturnType<typeof setInterval> | null = null;
+
+export async function pushPendingAll(): Promise<void> {
+  if (Platform.OS === 'web') return;
+  const online = await checkInternetConnection();
+  if (!online) return;
+  await syncPendingOrders();
+  await syncPendingStockMovements();
+  await syncPendingBookings();
+  await syncPendingPurchaseOrders();
+  _pullListeners.forEach((cb) => cb()); // beritahu UI setelah push selesai
+}
+
+export function startPushSync(intervalMs = 3_000): () => void {
+  if (Platform.OS === 'web') return () => {};
+  if (_pushTimer) clearInterval(_pushTimer);
+
+  _pushTimer = setInterval(() => {
+    pushPendingAll().catch(() => {});
+  }, intervalMs);
+
+  return () => {
+    if (_pushTimer) { clearInterval(_pushTimer); _pushTimer = null; }
+  };
 }

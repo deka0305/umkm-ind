@@ -1,12 +1,12 @@
 import { useEffect, useRef } from 'react';
-import { AppState, AppStateStatus } from 'react-native';
+import { AppState, AppStateStatus, Platform } from 'react-native';
 import { Stack } from 'expo-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { StatusBar } from 'expo-status-bar';
 import { useAuthStore } from '../stores/authStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useServerStore } from '../stores/serverStore';
-import { syncAll, pullFromSupabase, startAutoSync, onSyncStatusChange, onPullComplete } from '../lib/sync';
+import { syncAll, pullFromSupabase, startAutoSync, startPushSync, onSyncStatusChange, onPullComplete, notifyDataChange } from '../lib/sync';
 import { startHTTPServer, stopHTTPServer } from '../lib/httpServer';
 import { getLocalIP } from '../lib/networkUtils';
 import { supabase } from '../lib/supabase';
@@ -26,6 +26,7 @@ export default function RootLayout() {
   const loadSettings = useSettingsStore((s) => s.load);
   const { setServerRunning, setSyncStatus } = useServerStore();
   const stopAutoSyncRef = useRef<(() => void) | null>(null);
+  const stopPushSyncRef = useRef<(() => void) | null>(null);
   const fetchMenus = useMenuStore((s) => s.fetchMenus);
   const fetchIngredients = useStokStore((s) => s.fetchIngredients);
 
@@ -33,11 +34,21 @@ export default function RootLayout() {
     checkSession();
     loadSettings();
 
-    // Pull pertama saat app buka
-    pullFromSupabase().catch(() => {});
+    // Load awal: native pull dari Supabase ke SQLite; web langsung query Supabase via SupabaseDB
+    if (Platform.OS === 'web') {
+      fetchMenus().catch(() => {});
+      fetchIngredients().catch(() => {});
+      notifyDataChange();
+    } else {
+      pullFromSupabase().catch(() => {});
+    }
 
-    // Auto-sync setiap 15 detik (lebih responsif dari 60 detik)
-    stopAutoSyncRef.current = startAutoSync(15_000);
+    // Push-sync ringan setiap 3 detik — hanya kirim data pending ke Supabase.
+    // Fallback jika dual-write gagal (offline sementara, network flicker, emulator).
+    stopPushSyncRef.current = startPushSync(3_000);
+
+    // Full sync (pull + push) setiap 5 menit — safety net untuk data yang sangat stale.
+    stopAutoSyncRef.current = startAutoSync(5 * 60_000);
 
     // Update widget status sync
     const unsubSync = onSyncStatusChange((status, lastSync) => {
@@ -59,19 +70,24 @@ export default function RootLayout() {
     };
     const appStateSub = AppState.addEventListener('change', handleAppState);
 
-    // ── Realtime subscriptions: perubahan di Supabase → HP langsung update ───
-    // Satu channel dengan listener untuk 3 tabel sekaligus
+    // ── Realtime subscriptions: perubahan di Supabase → semua platform update ──
+    // Native: pull → simpan ke SQLite → notify
+    // Web: SupabaseDB sudah query Supabase langsung, cukup notify agar UI re-fetch
+    const onRealtimeMenus = () => Platform.OS === 'web'
+      ? (fetchMenus().catch(() => {}), notifyDataChange())
+      : pullFromSupabase().catch(() => {});
+    const onRealtimeIngredients = () => Platform.OS === 'web'
+      ? (fetchIngredients().catch(() => {}), notifyDataChange())
+      : pullFromSupabase().catch(() => {});
+    const onRealtimeOrders = () => Platform.OS === 'web'
+      ? notifyDataChange()
+      : pullFromSupabase().catch(() => {});
+
     const channel = supabase
       .channel('umkm-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'menus' }, () => {
-        pullFromSupabase().catch(() => {});
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'ingredients' }, () => {
-        pullFromSupabase().catch(() => {});
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => {
-        pullFromSupabase().catch(() => {});
-      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'menus' }, onRealtimeMenus)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'ingredients' }, onRealtimeIngredients)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, onRealtimeOrders)
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           console.log('[realtime] Terhubung — perubahan Supabase langsung masuk');
@@ -92,6 +108,7 @@ export default function RootLayout() {
     })();
 
     return () => {
+      stopPushSyncRef.current?.();
       stopAutoSyncRef.current?.();
       unsubSync();
       unsubPull();

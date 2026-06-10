@@ -24,18 +24,11 @@ export async function checkInternetConnection(): Promise<boolean> {
   try {
     const Network = await import('expo-network');
     const state = await Network.getNetworkStateAsync();
-    return !!(state.isConnected && state.isInternetReachable);
+    if (!state.isConnected) return false;
+    // isInternetReachable bisa null di emulator/beberapa device — anggap online
+    return state.isInternetReachable !== false;
   } catch {
-    // Fallback: coba fetch ke server publik
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3000);
-      await fetch('https://dns.google/resolve?name=supabase.co', { signal: controller.signal });
-      clearTimeout(timeout);
-      return true;
-    } catch {
-      return false;
-    }
+    return true; // tidak bisa cek → anggap online, biarkan request gagal sendiri
   }
 }
 

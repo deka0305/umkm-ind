@@ -131,15 +131,6 @@ export default function KatalogScreen() {
       ? (((parseFloat(form.sellPrice) - parseFloat(form.hpp)) / parseFloat(form.sellPrice)) * 100).toFixed(1)
       : null;
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator color={Colors.primary} size="large" />
-        <Text style={styles.loadingText}>Memuat katalog...</Text>
-      </View>
-    );
-  }
-
   return (
     <View style={styles.container}>
       {/* ── Header ─────────────────────────────────────── */}
@@ -236,6 +227,8 @@ export default function KatalogScreen() {
             numColumns={2}
             contentContainerStyle={styles.grid}
             columnWrapperStyle={styles.gridRow}
+            refreshing={loading && menus.length === 0}
+            onRefresh={fetchMenus}
             renderItem={({ item }) => <MenuCard menu={item} categories={categories} items={items} addItem={addItem} updateQty={updateQty} removeItem={removeItem} />}
             ListEmptyComponent={
               <View style={styles.emptyWrap}>

@@ -14,6 +14,7 @@
 
 import { Platform } from 'react-native';
 import { getDB, generateId } from './db';
+import { notifyDataChange } from './sync';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -76,7 +77,7 @@ function respond(socket: any, statusCode: number, contentType: string, body: str
   ].join('\r\n');
   try {
     socket.write(headers + body);
-    socket.destroy();
+    socket.end();
   } catch {}
 }
 
@@ -178,6 +179,7 @@ async function apiCreateOrder(socket: any, body: string): Promise<void> {
       );
     }
 
+    notifyDataChange();
     json(socket, { success: true, data: { id: orderId, total } }, 201);
   } catch (err: any) {
     json(socket, { success: false, error: err.message }, 500);
@@ -189,6 +191,7 @@ async function apiPatchOrderStatus(socket: any, orderId: string, body: string): 
     const { status } = JSON.parse(body);
     const db = await getDB();
     await db.runAsync('UPDATE orders SET status = ? WHERE id = ?', status, orderId);
+    notifyDataChange();
     json(socket, { success: true });
   } catch (err: any) {
     json(socket, { success: false, error: err.message }, 500);
@@ -330,6 +333,7 @@ function getWebUI(): string {
 '<div class="toast" id="toast-el"></div>' +
 '<script>' +
 'var menus=[],cats=[],cart=[],curCat="all";' +
+'function fetchT(u,o){var c=new AbortController(),t=setTimeout(function(){c.abort();},10000);return fetch(u,Object.assign({signal:c.signal},o||{})).finally(function(){clearTimeout(t);});}' +
 'function fmt(n){return "Rp "+Number(n||0).toLocaleString("id-ID");}' +
 'function el(id){return document.getElementById(id);}' +
 'function toast(msg,ms){' +
@@ -354,7 +358,7 @@ function getWebUI(): string {
 '}' +
 'function loadDB(){' +
 '  el("page-db").innerHTML="<div class=\\"spinner\\">Memuat...</div>";' +
-'  fetch("/api/dashboard").then(function(r){return r.json();}).then(function(res){' +
+'  fetchT("/api/dashboard").then(function(r){return r.json();}).then(function(res){' +
 '    if(!res.success)throw new Error(res.error||"Gagal");' +
 '    var d=res.data;' +
 '    var kritisLen=(d.stok_kritis||[]).length;' +
@@ -386,19 +390,21 @@ function getWebUI(): string {
 '      +"<div class=\\"card\\"><h2>Order Terbaru</h2>"' +
 '      +(rows||"<p style=\\"color:#999;font-size:13px\\">Belum ada order hari ini</p>")' +
 '      +"</div>";' +
-'  }).catch(function(e){' +
-'    el("page-db").innerHTML="<div class=\\"spinner\\" style=\\"color:#E24B4A\\">&#10060; Gagal memuat. Pastikan terhubung ke jaringan handphone.</div>";' +
+'  }).catch(function(){' +
+'    el("page-db").innerHTML="<div class=\\"spinner\\" style=\\"color:#E24B4A;font-size:13px\\">&#10060; Gagal memuat. Pastikan HP & perangkat ini di jaringan yang sama.</div>"' +
+'    +"<div style=\\"text-align:center;margin-top:12px\\"><button class=\\"btn btn-primary\\" style=\\"width:auto;padding:8px 20px\\" onclick=\\"loadDB()\\">Coba Lagi</button></div>";' +
 '  });' +
 '}' +
 'function loadMenus(){' +
 '  el("mnu-grid").innerHTML="<div class=\\"spinner\\">Memuat menu...</div>";' +
-'  fetch("/api/menus").then(function(r){return r.json();}).then(function(res){' +
+'  fetchT("/api/menus").then(function(r){return r.json();}).then(function(res){' +
 '    if(!res.success)throw new Error(res.error);' +
 '    menus=res.data.menus||[];' +
 '    cats=res.data.categories||[];' +
 '    renderCats();renderMenus();' +
 '  }).catch(function(){' +
-'    el("mnu-grid").innerHTML="<div class=\\"spinner\\" style=\\"color:#E24B4A\\">Gagal memuat menu</div>";' +
+'    el("mnu-grid").innerHTML="<div class=\\"spinner\\" style=\\"color:#E24B4A\\">&#10060; Gagal memuat menu.</div>"' +
+'    +"<div style=\\"text-align:center;margin-top:12px\\"><button class=\\"btn btn-primary\\" style=\\"width:auto;padding:8px 20px\\" onclick=\\"loadMenus()\\">Coba Lagi</button></div>";' +
 '  });' +
 '}' +
 'function renderCats(){' +
@@ -462,7 +468,7 @@ function getWebUI(): string {
 '  if(cart.length===0){toast("Keranjang masih kosong");return;}' +
 '  var btn=el("btn-order");' +
 '  btn.disabled=true;btn.textContent="Memproses...";' +
-'  fetch("/api/orders",{' +
+'  fetchT("/api/orders",{' +
 '    method:"POST",' +
 '    headers:{"Content-Type":"application/json"},' +
 '    body:JSON.stringify({' +
@@ -481,7 +487,7 @@ function getWebUI(): string {
 '}' +
 'function loadStock(){' +
 '  el("page-st").innerHTML="<div class=\\"spinner\\">Memuat stok...</div>";' +
-'  fetch("/api/ingredients").then(function(r){return r.json();}).then(function(res){' +
+'  fetchT("/api/ingredients").then(function(r){return r.json();}).then(function(res){' +
 '    if(!res.success)throw new Error(res.error);' +
 '    var items=res.data||[];' +
 '    var rows=items.map(function(i){' +
@@ -501,7 +507,8 @@ function getWebUI(): string {
 '    el("page-st").innerHTML=' +
 '      "<div class=\\"card\\"><h2>Status Stok Bahan Baku</h2>"+rows+"</div>";' +
 '  }).catch(function(){' +
-'    el("page-st").innerHTML="<div class=\\"spinner\\" style=\\"color:#E24B4A\\">Gagal memuat stok</div>";' +
+'    el("page-st").innerHTML="<div class=\\"spinner\\" style=\\"color:#E24B4A\\">&#10060; Gagal memuat stok.</div>"' +
+'    +"<div style=\\"text-align:center;margin-top:12px\\"><button class=\\"btn btn-primary\\" style=\\"width:auto;padding:8px 20px\\" onclick=\\"loadStock()\\">Coba Lagi</button></div>";' +
 '  });' +
 '}' +
 'loadDB();' +
@@ -525,6 +532,9 @@ export async function startHTTPServer(port = 3000): Promise<{ port: number } | n
   if (_server) await stopHTTPServer();
 
   _port = port;
+
+  // Pre-warm DB agar request pertama tidak hang saat initSchema berjalan
+  try { await getDB(); } catch {}
 
   return new Promise((resolve, reject) => {
     _server = TcpSocket.createServer((socket: any) => {

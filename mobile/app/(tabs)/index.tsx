@@ -6,6 +6,9 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { getDB } from '../../lib/db';
+import { onPullComplete, manualSync } from '../../lib/sync';
+import { useMenuStore } from '../../stores/menuStore';
+import { useStokStore } from '../../stores/stokStore';
 import { getStokStatus } from '../../stores/stokStore';
 import { formatRupiah } from '../../lib/hpp-calculator';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -40,10 +43,13 @@ function todayStr() {
   return new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
 }
 
-// Widget yang menampilkan URL server lokal dan status sync
-function ServerStatusWidget() {
+// Widget status + tombol sinkron manual (tampil di web dan Android)
+function ServerStatusWidget({ onSync }: { onSync: () => Promise<void> }) {
   const { serverRunning, serverURL, syncStatus, lastSync } = useServerStore();
-  if (Platform.OS === 'web') return null;
+  const [syncing, setSyncing] = useState(false);
+  const [doneAt, setDoneAt]   = useState<Date | null>(null);
+
+  const statusNow = syncing ? 'syncing' : syncStatus;
 
   const syncLabel: Record<string, { text: string; color: string; icon: any }> = {
     idle:    { text: 'Tersinkron',   color: Colors.primary, icon: 'cloud-done-outline'    },
@@ -51,7 +57,18 @@ function ServerStatusWidget() {
     error:   { text: 'Sync gagal',  color: Colors.danger,  icon: 'cloud-offline-outline' },
     offline: { text: 'Offline',     color: Colors.amber,   icon: 'cloud-offline-outline' },
   };
-  const sc = syncLabel[syncStatus] ?? syncLabel.idle;
+  const sc = syncLabel[statusNow] ?? syncLabel.idle;
+
+  async function handleSync() {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      await onSync();
+      setDoneAt(new Date());
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   function copyURL() {
     if (serverURL) {
@@ -60,38 +77,53 @@ function ServerStatusWidget() {
     }
   }
 
+  const lastTime = doneAt ?? lastSync;
+
   return (
     <View style={sw.container}>
-      {/* Server lokal */}
-      <View style={sw.row}>
-        <Ionicons name={serverRunning ? 'wifi' : 'wifi-outline'} size={16} color={serverRunning ? Colors.primary : Colors.textMuted} />
-        <Text style={sw.label}>Server Lokal</Text>
-        {serverRunning && serverURL ? (
-          <TouchableOpacity onPress={copyURL} style={sw.urlBtn}>
-            <Text style={sw.url}>{serverURL}</Text>
-            <Ionicons name="copy-outline" size={13} color={Colors.primary} />
-          </TouchableOpacity>
-        ) : (
-          <Text style={[sw.url, { color: Colors.textMuted }]}>Tidak aktif</Text>
-        )}
-      </View>
+      {/* Server lokal — hanya tampil di native */}
+      {Platform.OS !== 'web' && (
+        <>
+          <View style={sw.row}>
+            <Ionicons name={serverRunning ? 'wifi' : 'wifi-outline'} size={16} color={serverRunning ? Colors.primary : Colors.textMuted} />
+            <Text style={sw.label}>Server Lokal</Text>
+            {serverRunning && serverURL ? (
+              <TouchableOpacity onPress={copyURL} style={sw.urlBtn}>
+                <Text style={sw.url}>{serverURL}</Text>
+                <Ionicons name="copy-outline" size={13} color={Colors.primary} />
+              </TouchableOpacity>
+            ) : (
+              <Text style={[sw.url, { color: Colors.textMuted }]}>Tidak aktif</Text>
+            )}
+          </View>
+          <View style={sw.divider} />
+        </>
+      )}
 
-      {/* Divider */}
-      <View style={sw.divider} />
-
-      {/* Sync Supabase */}
+      {/* Baris sync: status + tombol sinkron */}
       <View style={sw.row}>
         <Ionicons name={sc.icon} size={16} color={sc.color} />
         <Text style={sw.label}>Supabase</Text>
         <Text style={[sw.syncText, { color: sc.color }]}>{sc.text}</Text>
-        {lastSync && (
+        {lastTime && (
           <Text style={sw.lastSync}>
-            {new Date(lastSync).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+            {new Date(lastTime).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
           </Text>
         )}
+        <TouchableOpacity
+          onPress={handleSync}
+          disabled={syncing}
+          style={[sw.syncBtn, syncing && sw.syncBtnDisabled]}
+        >
+          {syncing
+            ? <ActivityIndicator size={12} color={Colors.white} />
+            : <Ionicons name="sync-outline" size={13} color={Colors.white} />
+          }
+          <Text style={sw.syncBtnText}>{syncing ? 'Proses...' : 'Sinkron'}</Text>
+        </TouchableOpacity>
       </View>
 
-      {serverRunning && serverURL && (
+      {Platform.OS !== 'web' && serverRunning && serverURL && (
         <Text style={sw.hint}>
           Buka <Text style={{ color: Colors.primary }}>{serverURL}</Text> di browser perangkat lain (WiFi sama)
         </Text>
@@ -115,14 +147,17 @@ const sw = StyleSheet.create({
     shadowRadius: 4,
     elevation: 2,
   },
-  row:      { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  divider:  { height: 1, backgroundColor: '#f0f0f0', marginVertical: 7 },
-  label:    { fontSize: 12, color: Colors.textSecondary, fontWeight: '500', marginRight: 2 },
-  url:      { fontSize: 12, color: Colors.primary, fontWeight: '700', flex: 1 },
-  urlBtn:   { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
-  syncText: { fontSize: 12, fontWeight: '600', flex: 1 },
-  lastSync: { fontSize: 11, color: Colors.textMuted },
-  hint:     { fontSize: 11, color: Colors.textMuted, marginTop: 6, lineHeight: 15 },
+  row:            { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  divider:        { height: 1, backgroundColor: '#f0f0f0', marginVertical: 7 },
+  label:          { fontSize: 12, color: Colors.textSecondary, fontWeight: '500', marginRight: 2 },
+  url:            { fontSize: 12, color: Colors.primary, fontWeight: '700', flex: 1 },
+  urlBtn:         { flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1 },
+  syncText:       { fontSize: 12, fontWeight: '600', flex: 1 },
+  lastSync:       { fontSize: 11, color: Colors.textMuted },
+  hint:           { fontSize: 11, color: Colors.textMuted, marginTop: 6, lineHeight: 15 },
+  syncBtn:        { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.primary, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, marginLeft: 4 },
+  syncBtnDisabled:{ backgroundColor: Colors.textMuted },
+  syncBtnText:    { fontSize: 12, color: Colors.white, fontWeight: '600' },
 });
 
 export default function DashboardScreen() {
@@ -303,7 +338,19 @@ export default function DashboardScreen() {
 
   useEffect(() => { loadData(); }, []);
 
+  // Refresh otomatis setiap kali ada data baru: dari Supabase Realtime,
+  // mutasi lokal (order baru, stok berubah), atau sync selesai.
+  useEffect(() => onPullComplete(() => { loadData().catch(() => {}); }), [loadData]);
+
   const onRefresh = () => { setRefreshing(true); loadData(); };
+
+  const fetchMenus      = useMenuStore((s) => s.fetchMenus);
+  const fetchIngredients = useStokStore((s) => s.fetchIngredients);
+
+  const handleManualSync = useCallback(async () => {
+    await manualSync();
+    await Promise.all([fetchMenus(), fetchIngredients(), loadData()]);
+  }, [fetchMenus, fetchIngredients, loadData]);
 
   if (loading) {
     return (
@@ -354,7 +401,7 @@ export default function DashboardScreen() {
       </View>
 
       {/* ── Server & Sync Status ──────────────────────── */}
-      <ServerStatusWidget />
+      <ServerStatusWidget onSync={handleManualSync} />
 
       {/* ── Quick Actions ──────────────────────────────── */}
       <View style={s.section}>
