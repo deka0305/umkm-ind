@@ -5,8 +5,9 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { getDB } from '../../lib/db';
+import { getDB, resetAllData } from '../../lib/db';
 import { onPullComplete, manualSync } from '../../lib/sync';
+import { useCartStore } from '../../stores/cartStore';
 import { useMenuStore } from '../../stores/menuStore';
 import { useStokStore } from '../../stores/stokStore';
 import { getStokStatus } from '../../stores/stokStore';
@@ -162,6 +163,7 @@ const sw = StyleSheet.create({
 
 export default function DashboardScreen() {
   const router = useRouter();
+  const { clearCart, setEditOrder } = useCartStore();
   const { ppn, namaUsaha, alamat, noTelp, save: saveSettings } = useSettingsStore();
   const [data, setData] = useState<DashboardData>({
     totalOrder: 0, pendapatan: 0, orderPending: 0, stokKritis: [], orderTerbaru: [], topMenu: [],
@@ -282,6 +284,48 @@ export default function DashboardScreen() {
     }
     saveSettings({ ppn: parsed, namaUsaha: formNama.trim() || 'UMKM Pro' });
     setShowSettings(false);
+  }
+
+  function handleTambahMenu(order: { id: string; tableNo: string }) {
+    clearCart();
+    setEditOrder(order.id, order.tableNo || '-');
+    router.push('/(tabs)/katalog');
+  }
+
+  function handleResetData() {
+    Alert.alert(
+      'Reset Semua Data',
+      'Semua data (order, menu, stok, customer) akan dihapus permanen dari perangkat dan Supabase.\n\nData tidak bisa dipulihkan!',
+      [
+        { text: 'Batal', style: 'cancel' },
+        {
+          text: 'Hapus Semua',
+          style: 'destructive',
+          onPress: () =>
+            Alert.alert(
+              'Konfirmasi Akhir',
+              'Anda yakin ingin menghapus SEMUA data secara permanen?',
+              [
+                { text: 'Batal', style: 'cancel' },
+                {
+                  text: 'Ya, Reset',
+                  style: 'destructive',
+                  onPress: async () => {
+                    try {
+                      setShowSettings(false);
+                      await resetAllData();
+                      await loadData();
+                      Alert.alert('Berhasil', 'Semua data telah direset ke kondisi awal.');
+                    } catch {
+                      Alert.alert('Gagal', 'Terjadi kesalahan saat mereset data.');
+                    }
+                  },
+                },
+              ],
+            ),
+        },
+      ],
+    );
   }
 
   async function markSelesai(orderId: string) {
@@ -538,19 +582,30 @@ export default function DashboardScreen() {
                 </View>
                 <View style={{ alignItems: 'flex-end', gap: 3 }}>
                   <Text style={s.orderTotal}>{formatRupiah(order.total)}</Text>
-                  {order.status !== 'selesai' && order.status !== 'batal' ? (
-                    <TouchableOpacity
-                      style={s.selesaiBtn}
-                      onPress={(e) => { e.stopPropagation?.(); markSelesai(order.id); }}
-                    >
-                      <Ionicons name="checkmark" size={11} color={Colors.white} />
-                      <Text style={s.selesaiBtnText}>Selesai</Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <View style={[s.badge, { backgroundColor: cfg.bg }]}>
-                      <Text style={[s.badgeText, { color: cfg.color }]}>{cfg.label}</Text>
-                    </View>
-                  )}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    {order.status !== 'selesai' && order.status !== 'batal' ? (
+                      <TouchableOpacity
+                        style={s.selesaiBtn}
+                        onPress={(e) => { e.stopPropagation?.(); markSelesai(order.id); }}
+                      >
+                        <Ionicons name="checkmark" size={11} color={Colors.white} />
+                        <Text style={s.selesaiBtnText}>Selesai</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View style={[s.badge, { backgroundColor: cfg.bg }]}>
+                        <Text style={[s.badgeText, { color: cfg.color }]}>{cfg.label}</Text>
+                      </View>
+                    )}
+                    {order.status !== 'batal' && (
+                      <TouchableOpacity
+                        style={s.tambahMenuBtn}
+                        onPress={(e) => { e.stopPropagation?.(); handleTambahMenu(order); }}
+                      >
+                        <Ionicons name="add" size={11} color={Colors.info} />
+                        <Text style={s.tambahMenuBtnText}>+Menu</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
                 </View>
                 <Ionicons name="chevron-forward" size={14} color={Colors.textMuted} style={{ marginLeft: 2 }} />
               </TouchableOpacity>
@@ -777,6 +832,12 @@ export default function DashboardScreen() {
             <Ionicons name="checkmark-circle" size={18} color={Colors.white} />
             <Text style={s.settingsSaveBtnText}>Simpan Pengaturan</Text>
           </TouchableOpacity>
+
+          <View style={s.resetDivider} />
+          <TouchableOpacity style={s.resetBtn} onPress={handleResetData}>
+            <Ionicons name="trash-outline" size={18} color={Colors.danger} />
+            <Text style={s.resetBtnText}>Reset Semua Data</Text>
+          </TouchableOpacity>
         </View>
       </View>
     </Modal>
@@ -906,6 +967,12 @@ const s = StyleSheet.create({
     paddingHorizontal: 8, paddingVertical: 3,
   },
   selesaiBtnText: { fontSize: 10, fontWeight: '700', color: Colors.white },
+  tambahMenuBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 2,
+    backgroundColor: Colors.infoLight, borderRadius: Radius.full,
+    paddingHorizontal: 7, paddingVertical: 3,
+  },
+  tambahMenuBtnText: { fontSize: 10, fontWeight: '700', color: Colors.info },
 
   /* Empty state */
   emptyBox: { alignItems: 'center', paddingVertical: Spacing.lg, gap: 8 },
@@ -1002,6 +1069,16 @@ const s = StyleSheet.create({
     padding: Spacing.md, marginTop: Spacing.lg,
   },
   settingsSaveBtnText: { color: Colors.white, fontWeight: '700', fontSize: FontSize.base },
+
+  /* Reset button */
+  resetDivider: { height: 1, backgroundColor: Colors.border, marginTop: Spacing.lg },
+  resetBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    borderWidth: 1.5, borderColor: Colors.danger + '50', borderRadius: Radius.md,
+    padding: Spacing.md, marginTop: Spacing.sm,
+    backgroundColor: Colors.dangerLight,
+  },
+  resetBtnText: { color: Colors.danger, fontWeight: '700', fontSize: FontSize.base },
 });
 
 const sd = StyleSheet.create({

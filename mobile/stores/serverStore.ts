@@ -19,7 +19,7 @@ export interface ServerStore {
 
 export const useServerStore = create<ServerStore>((set, get) => ({
   serverRunning: false,
-  serverPort: 3000,
+  serverPort: 3333,
   localIP: '0.0.0.0',
   serverURL: '',
 

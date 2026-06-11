@@ -27,13 +27,16 @@ const PAYMENT_METHODS = [
 export default function CartScreen() {
   const router = useRouter();
   const {
-    items, tableNo, paymentMethod, discount,
+    items, tableNo, paymentMethod, discount, editOrderId, editOrderTable,
     updateQty, removeItem, setTableNo, setPaymentMethod,
     getSubtotal, getTotal, clearCart,
   } = useCartStore();
+  const isEditMode = editOrderId !== '';
   const [note, setNote] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState<'bayar' | 'catat' | null>(null);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [orderIsPending, setOrderIsPending] = useState(false);
+  const [isAddMode, setIsAddMode] = useState(false);
   const [orderId, setOrderId] = useState('');
   const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
@@ -43,9 +46,9 @@ export default function CartScreen() {
   const tax = subtotal * (ppn / 100);
   const total = getTotal();
 
-  async function checkout() {
+  async function checkout(mode: 'bayar' | 'catat') {
     if (items.length === 0) return Alert.alert('Keranjang kosong');
-    setLoading(true);
+    setLoading(mode);
     try {
       const db = await getDB();
 
@@ -69,24 +72,25 @@ export default function CartScreen() {
         const detail = changed
           .map((i) => `• ${i.name}: Rp ${i.price.toLocaleString('id-ID')} → Rp ${freshPrices[i.menuId].price.toLocaleString('id-ID')}`)
           .join('\n');
-        setLoading(false);
+        setLoading(null);
         Alert.alert(
           'Harga Menu Berubah',
           `Beberapa harga telah diperbarui:\n\n${detail}\n\nTotal akan dihitung ulang.`,
-          [{ text: 'Lanjutkan', onPress: () => doCheckout(freshPrices) }]
+          [{ text: 'Lanjutkan', onPress: () => doCheckout(freshPrices, mode) }]
         );
         return;
       }
 
-      await doCheckout(freshPrices);
+      await doCheckout(freshPrices, mode);
     } catch (err) {
       Alert.alert('Gagal menyimpan order', String(err));
-      setLoading(false);
+      setLoading(null);
     }
   }
 
-  async function doCheckout(freshPrices: Record<string, { name: string; price: number }>) {
-    setLoading(true);
+  async function doCheckout(freshPrices: Record<string, { name: string; price: number }>, mode: 'bayar' | 'catat') {
+    const status = mode === 'bayar' ? 'selesai' : 'pending';
+    setLoading(mode);
     try {
       const db = await getDB();
 
@@ -112,8 +116,8 @@ export default function CartScreen() {
       await db.runAsync(
         `INSERT INTO orders
            (id, table_no, status, payment_method, subtotal, tax, discount, total, note, synced, created_at)
-         VALUES (?, ?, 'selesai', ?, ?, ?, ?, ?, ?, ?, ?)`,
-        newOrderId, snapTableNo, snapPayment,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        newOrderId, snapTableNo, status, snapPayment,
         snapSubtotal, snapTax, snapDiscount, snapTotal,
         note || null, online ? 1 : 0, now
       );
@@ -134,6 +138,7 @@ export default function CartScreen() {
       // ── 2. Update UI seketika (tidak tunggu Supabase) ────────────────────────
       const shortId = newOrderId.slice(-6).toUpperCase();
       setOrderId(shortId);
+      setOrderIsPending(mode === 'catat');
       setReceiptData({
         orderId: shortId, items: snapItems, tableNo: snapTableNo,
         paymentMethod: snapPayment, subtotal: snapSubtotal, tax: snapTax,
@@ -150,7 +155,7 @@ export default function CartScreen() {
       if (online) {
         Promise.all([
           supabase.from('orders').upsert({
-            id: newOrderId, table_no: snapTableNo, status: 'selesai',
+            id: newOrderId, table_no: snapTableNo, status,
             payment_method: snapPayment, subtotal: snapSubtotal, tax: snapTax,
             discount: snapDiscount, total: snapTotal,
             note: note || null, created_at: now,
@@ -169,7 +174,80 @@ export default function CartScreen() {
     } catch (err) {
       Alert.alert('Gagal menyimpan order', String(err));
     } finally {
-      setLoading(false);
+      setLoading(null);
+    }
+  }
+
+  async function doAddToOrder() {
+    if (items.length === 0) return Alert.alert('Keranjang kosong');
+    setLoading('bayar');
+    try {
+      const db = await getDB();
+
+      const freshPrices: Record<string, { name: string; price: number }> = {};
+      await Promise.all(
+        items.map(async (item) => {
+          const row = await db.getFirstAsync('SELECT name, sell_price FROM menus WHERE id = ?', item.menuId) as any;
+          if (row) freshPrices[item.menuId] = { name: row.name, price: row.sell_price };
+        })
+      );
+
+      const existing = await db.getFirstAsync(
+        'SELECT subtotal, tax, discount FROM orders WHERE id = ?', editOrderId
+      ) as any;
+      if (!existing) throw new Error('Order tidak ditemukan');
+
+      const snapItems = items.map((i) => ({
+        menuId: i.menuId,
+        name: freshPrices[i.menuId]?.name ?? i.name,
+        qty: i.qty,
+        price: freshPrices[i.menuId]?.price ?? i.price,
+        itemId: generateId(),
+      }));
+
+      const addedSubtotal = snapItems.reduce((s, i) => s + i.price * i.qty, 0);
+      const newSubtotal = (existing.subtotal ?? 0) + addedSubtotal;
+      const newTax = newSubtotal * (ppn / 100);
+      const newTotal = newSubtotal + newTax - (existing.discount ?? 0);
+
+      const online = Platform.OS !== 'web' && await checkInternetConnection();
+
+      for (const item of snapItems) {
+        await db.runAsync(
+          'INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal) VALUES (?, ?, ?, ?, ?, ?)',
+          item.itemId, editOrderId, item.menuId, item.qty, item.price, item.price * item.qty
+        );
+      }
+      await db.runAsync(
+        'UPDATE orders SET subtotal = ?, tax = ?, total = ?, synced = ? WHERE id = ?',
+        newSubtotal, newTax, newTotal, online ? 1 : 0, editOrderId
+      );
+
+      const shortId = editOrderId.slice(-6).toUpperCase();
+      setOrderId(shortId);
+      setIsAddMode(true);
+      clearCart();
+      notifyDataChange();
+      setShowSuccess(true);
+
+      if (online) {
+        Promise.all([
+          supabase.from('order_items').upsert(
+            snapItems.map((i) => ({
+              id: i.itemId, order_id: editOrderId, menu_id: i.menuId,
+              qty: i.qty, price: i.price, subtotal: i.price * i.qty,
+            }))
+          ),
+          supabase.from('orders').update({ subtotal: newSubtotal, tax: newTax, total: newTotal })
+            .eq('id', editOrderId),
+        ]).catch(() => {
+          db.runAsync('UPDATE orders SET synced = 0 WHERE id = ?', editOrderId).catch(() => {});
+        });
+      }
+    } catch (err) {
+      Alert.alert('Gagal menyimpan', String(err));
+    } finally {
+      setLoading(null);
     }
   }
 
@@ -177,10 +255,16 @@ export default function CartScreen() {
     return (
       <View style={s.emptyContainer}>
         <View style={s.emptyIllustration}>
-          <Ionicons name="cart-outline" size={52} color={Colors.primary} />
+          <Ionicons name={isEditMode ? 'add-circle-outline' : 'cart-outline'} size={52} color={Colors.primary} />
         </View>
-        <Text style={s.emptyTitle}>Keranjang masih kosong</Text>
-        <Text style={s.emptyDesc}>Tambahkan menu dari katalog untuk mulai order</Text>
+        <Text style={s.emptyTitle}>
+          {isEditMode ? 'Pilih menu tambahan' : 'Keranjang masih kosong'}
+        </Text>
+        <Text style={s.emptyDesc}>
+          {isEditMode
+            ? `Tambahkan menu ke Order Meja ${editOrderTable}`
+            : 'Tambahkan menu dari katalog untuk mulai order'}
+        </Text>
         <TouchableOpacity style={s.backBtn} onPress={() => router.back()}>
           <Ionicons name="restaurant-outline" size={16} color={Colors.white} />
           <Text style={s.backBtnText}>Pilih Menu</Text>
@@ -192,6 +276,16 @@ export default function CartScreen() {
   return (
     <View style={s.container}>
       <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
+
+        {/* ── Edit Order Banner ───────────────────── */}
+        {isEditMode && (
+          <View style={s.editBanner}>
+            <Ionicons name="add-circle" size={15} color={Colors.info} />
+            <Text style={s.editBannerText}>
+              Menambahkan menu ke Order Meja {editOrderTable}
+            </Text>
+          </View>
+        )}
 
         {/* ── Item List ────────────────────────────── */}
         <View style={s.card}>
@@ -290,60 +384,104 @@ export default function CartScreen() {
 
       {/* ── Sticky Footer ───────────────────────── */}
       <View style={s.footer}>
-        <View>
+        <View style={s.footerInfo}>
           <Text style={s.footerLabel}>{items.length} item dipilih</Text>
-          <Text style={s.footerTotal}>{formatRupiah(total)}</Text>
+          <Text style={s.footerTotal}>{formatRupiah(isEditMode ? getSubtotal() : total)}</Text>
         </View>
-        <TouchableOpacity
-          style={[s.checkoutBtn, loading && { opacity: 0.7 }]}
-          onPress={checkout}
-          disabled={loading}
-        >
-          {loading
-            ? <Text style={s.checkoutText}>Memproses...</Text>
-            : <>
-                <Ionicons name="checkmark-circle" size={18} color={Colors.white} />
-                <Text style={s.checkoutText}>Bayar Sekarang</Text>
-              </>
-          }
-        </TouchableOpacity>
+        <View style={s.footerBtns}>
+          {isEditMode ? (
+            <TouchableOpacity
+              style={[s.checkoutBtn, loading !== null && { opacity: 0.7 }]}
+              onPress={doAddToOrder}
+              disabled={loading !== null}
+            >
+              {loading === 'bayar'
+                ? <Text style={s.checkoutText}>Menyimpan...</Text>
+                : <>
+                    <Ionicons name="add-circle" size={18} color={Colors.white} />
+                    <Text style={s.checkoutText}>Simpan Tambahan</Text>
+                  </>
+              }
+            </TouchableOpacity>
+          ) : (
+            <>
+              <TouchableOpacity
+                style={[s.catatBtn, loading !== null && { opacity: 0.7 }]}
+                onPress={() => checkout('catat')}
+                disabled={loading !== null}
+              >
+                {loading === 'catat'
+                  ? <Text style={s.catatText}>Mencatat...</Text>
+                  : <>
+                      <Ionicons name="time-outline" size={16} color={Colors.amber} />
+                      <Text style={s.catatText}>Bayar nanti</Text>
+                    </>
+                }
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.checkoutBtn, loading !== null && { opacity: 0.7 }]}
+                onPress={() => checkout('bayar')}
+                disabled={loading !== null}
+              >
+                {loading === 'bayar'
+                  ? <Text style={s.checkoutText}>Memproses...</Text>
+                  : <>
+                      <Ionicons name="checkmark-circle" size={18} color={Colors.white} />
+                      <Text style={s.checkoutText}>Bayar Sekarang</Text>
+                    </>
+                }
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
       </View>
 
       {/* ── Success Modal ───────────────────────── */}
       <Modal visible={showSuccess} transparent animationType="fade">
         <View style={s.successOverlay}>
           <View style={s.successBox}>
-            <View style={s.successIconWrap}>
-              <Ionicons name="checkmark" size={42} color={Colors.white} />
+            <View style={[s.successIconWrap, !isAddMode && orderIsPending && { backgroundColor: Colors.amber }, isAddMode && { backgroundColor: Colors.info }]}>
+              <Ionicons name={isAddMode ? 'add-circle' : orderIsPending ? 'time' : 'checkmark'} size={42} color={Colors.white} />
             </View>
-            <Text style={s.successTitle}>Order Berhasil!</Text>
+            <Text style={s.successTitle}>
+              {isAddMode ? 'Menu Ditambahkan!' : orderIsPending ? 'Pesanan Dicatat!' : 'Order Berhasil!'}
+            </Text>
             <Text style={s.successOrderId}>#{orderId}</Text>
-            <Text style={s.successSub}>Order telah dicatat dan siap diproses</Text>
-            <View style={s.successMeta}>
-              <Ionicons name="time-outline" size={14} color={Colors.textMuted} />
-              <Text style={s.successMetaText}>{paymentMethod}</Text>
-              <Ionicons name="card-outline" size={14} color={Colors.textMuted} />
-              <Text style={s.successMetaText}>{formatRupiah(total)}</Text>
-            </View>
-            <TouchableOpacity
-              style={s.printBtn}
-              onPress={() => setShowReceipt(true)}
-            >
-              <Ionicons name="receipt-outline" size={16} color={Colors.primary} />
-              <Text style={s.printBtnText}>Lihat &amp; Cetak Struk</Text>
-            </TouchableOpacity>
+            <Text style={s.successSub}>
+              {isAddMode
+                ? 'Item baru berhasil ditambahkan ke order'
+                : orderIsPending
+                  ? 'Pesanan menunggu — tandai Selesai di dashboard setelah dibayar'
+                  : 'Order telah dicatat dan siap diproses'}
+            </Text>
+            {!isAddMode && (
+              <View style={s.successMeta}>
+                <Ionicons name="time-outline" size={14} color={Colors.textMuted} />
+                <Text style={s.successMetaText}>{paymentMethod}</Text>
+                <Ionicons name="card-outline" size={14} color={Colors.textMuted} />
+                <Text style={s.successMetaText}>{formatRupiah(total)}</Text>
+              </View>
+            )}
+            {!isAddMode && (
+              <TouchableOpacity style={s.printBtn} onPress={() => setShowReceipt(true)}>
+                <Ionicons name="receipt-outline" size={16} color={Colors.primary} />
+                <Text style={s.printBtnText}>Lihat &amp; Cetak Struk</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
               style={s.successBtn}
-              onPress={() => { setShowSuccess(false); router.replace('/(tabs)'); }}
+              onPress={() => { setShowSuccess(false); setIsAddMode(false); router.replace('/(tabs)'); }}
             >
               <Text style={s.successBtnText}>Kembali ke Dashboard</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={s.successBtnOutline}
-              onPress={() => { setShowSuccess(false); router.replace('/(tabs)/katalog'); }}
-            >
-              <Text style={s.successBtnOutlineText}>Order Lagi</Text>
-            </TouchableOpacity>
+            {!isAddMode && (
+              <TouchableOpacity
+                style={s.successBtnOutline}
+                onPress={() => { setShowSuccess(false); router.replace('/(tabs)/katalog'); }}
+              >
+                <Text style={s.successBtnOutlineText}>Order Lagi</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
       </Modal>
@@ -368,7 +506,7 @@ function SummaryRow({ label, value, bold, color }: { label: string; value: strin
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
-  content: { padding: Spacing.md, paddingBottom: 100, gap: Spacing.sm },
+  content: { padding: Spacing.md, paddingBottom: 140, gap: Spacing.sm },
 
   /* Empty state */
   emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: Spacing.sm, padding: Spacing.xl },
@@ -441,17 +579,25 @@ const s = StyleSheet.create({
   /* Footer */
   footer: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
-    backgroundColor: Colors.white, paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: Colors.white, paddingHorizontal: Spacing.md, paddingTop: Spacing.sm, paddingBottom: 16,
+    flexDirection: 'column', gap: 8,
     borderTopWidth: 1, borderTopColor: Colors.border,
     elevation: 12, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 8, shadowOffset: { width: 0, height: -2 },
   },
+  footerInfo: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   footerLabel: { fontSize: FontSize.xs, color: Colors.textMuted },
   footerTotal: { fontSize: FontSize.lg, fontWeight: '800', color: Colors.textPrimary },
+  footerBtns: { flexDirection: 'row', gap: 8 },
+  catatBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    borderWidth: 1.5, borderColor: Colors.amber, borderRadius: Radius.md,
+    paddingVertical: 13, backgroundColor: Colors.amberLight,
+  },
+  catatText: { color: Colors.amber, fontWeight: '700', fontSize: FontSize.sm },
   checkoutBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
     backgroundColor: Colors.primary, borderRadius: Radius.md,
-    paddingHorizontal: Spacing.lg, paddingVertical: 12,
+    paddingVertical: 13,
   },
   checkoutText: { color: Colors.white, fontWeight: '700', fontSize: FontSize.sm },
 
@@ -487,4 +633,13 @@ const s = StyleSheet.create({
     paddingVertical: 12, width: '100%', backgroundColor: Colors.primaryLight, marginTop: 8,
   },
   printBtnText: { color: Colors.primary, fontWeight: '700', fontSize: FontSize.sm },
+
+  /* Edit order banner */
+  editBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: Colors.infoLight, borderRadius: Radius.sm,
+    paddingHorizontal: Spacing.sm, paddingVertical: 10,
+    borderWidth: 1, borderColor: Colors.info + '30',
+  },
+  editBannerText: { flex: 1, fontSize: FontSize.sm, color: Colors.info, fontWeight: '600' },
 });

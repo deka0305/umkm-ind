@@ -29,7 +29,7 @@ interface HTTPRequest {
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let _server: any = null;
-let _port = 3000;
+let _port = 3333;
 
 // ─── HTTP Utilities ───────────────────────────────────────────────────────────
 
@@ -76,8 +76,9 @@ function respond(socket: any, statusCode: number, contentType: string, body: str
     '',
   ].join('\r\n');
   try {
-    socket.write(headers + body);
-    socket.end();
+    socket.write(headers + body, 'utf-8', () => {
+      try { socket.end(); } catch {}
+    });
   } catch {}
 }
 

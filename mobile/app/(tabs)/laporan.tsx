@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, Platform,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, Platform, Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getDB } from '../../lib/db';
 import { formatRupiah } from '../../lib/hpp-calculator';
+import { exportToPDF, exportToExcel, ReportData } from '../../lib/exportReport';
+import { useSettingsStore } from '../../stores/settingsStore';
 import { Colors, FontSize, Spacing, Radius } from '../../constants/theme';
 
 type Period = 'hari' | 'minggu' | 'bulan' | 'tahun';
@@ -21,6 +23,7 @@ const STATUS_COLOR: Record<string, { label: string; color: string; bg: string }>
 };
 
 export default function LaporanScreen() {
+  const { namaUsaha } = useSettingsStore();
   const [period, setPeriod] = useState<Period>('minggu');
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [points, setPoints] = useState<RevenuePoint[]>([]);
@@ -28,6 +31,9 @@ export default function LaporanScreen() {
   const [totalRevenue, setTotalRevenue] = useState(0);
   const [totalOrder, setTotalOrder] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [dateRange, setDateRange] = useState({ start: '', end: '' });
 
   useEffect(() => { loadData(); }, [period]);
 
@@ -49,6 +55,7 @@ export default function LaporanScreen() {
       } else {
         startDate = `${now.getFullYear()}-01-01`;
       }
+      setDateRange({ start: startDate, end: endDate });
 
       const rows = await db.getAllAsync<any>(
         `SELECT date(created_at) as tgl, COALESCE(SUM(total),0) as revenue, COUNT(*) as jml_order
@@ -85,6 +92,37 @@ export default function LaporanScreen() {
     }
   }
 
+  function buildReportData(): ReportData {
+    return {
+      period,
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+      totalRevenue,
+      totalOrder,
+      namaUsaha: namaUsaha || 'UMKM Pro',
+      points,
+      topMenus,
+      orders,
+    };
+  }
+
+  async function handleExport(type: 'pdf' | 'excel') {
+    setShowExportMenu(false);
+    setExporting(true);
+    try {
+      const data = buildReportData();
+      if (type === 'pdf') {
+        await exportToPDF(data);
+      } else {
+        await exportToExcel(data);
+      }
+    } catch (e: any) {
+      Alert.alert('Gagal Export', e?.message ?? 'Terjadi kesalahan saat mengekspor laporan.');
+    } finally {
+      setExporting(false);
+    }
+  }
+
   async function updateStatus(id: string, status: string) {
     const db = await getDB();
     await db.runAsync(`UPDATE orders SET status = ? WHERE id = ?`, status, id);
@@ -106,15 +144,60 @@ export default function LaporanScreen() {
 
   return (
     <ScrollView style={s.container} contentContainerStyle={s.content}>
-      <View style={s.periodRow}>
-        {(['hari', 'minggu', 'bulan', 'tahun'] as Period[]).map((p) => (
-          <TouchableOpacity key={p} style={[s.periodBtn, period === p && s.periodBtnActive]} onPress={() => setPeriod(p)}>
-            <Text style={[s.periodText, period === p && s.periodTextActive]}>
-              {p.charAt(0).toUpperCase() + p.slice(1)}
-            </Text>
-          </TouchableOpacity>
-        ))}
+      <View style={s.topRow}>
+        <View style={s.periodRow}>
+          {(['hari', 'minggu', 'bulan', 'tahun'] as Period[]).map((p) => (
+            <TouchableOpacity key={p} style={[s.periodBtn, period === p && s.periodBtnActive]} onPress={() => setPeriod(p)}>
+              <Text style={[s.periodText, period === p && s.periodTextActive]}>
+                {p.charAt(0).toUpperCase() + p.slice(1)}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <TouchableOpacity
+          style={[s.exportBtn, exporting && { opacity: 0.5 }]}
+          onPress={() => setShowExportMenu(true)}
+          disabled={exporting || loading}
+        >
+          {exporting
+            ? <ActivityIndicator size={14} color={Colors.white} />
+            : <Ionicons name="download-outline" size={16} color={Colors.white} />
+          }
+          <Text style={s.exportBtnText}>Export</Text>
+        </TouchableOpacity>
       </View>
+
+      {/* Modal pilihan format export */}
+      <Modal visible={showExportMenu} transparent animationType="fade">
+        <TouchableOpacity style={s.modalOverlay} activeOpacity={1} onPress={() => setShowExportMenu(false)}>
+          <View style={s.exportSheet}>
+            <Text style={s.exportSheetTitle}>Export Laporan</Text>
+            <TouchableOpacity style={s.exportOption} onPress={() => handleExport('pdf')}>
+              <View style={[s.exportIcon, { backgroundColor: '#FFE8E8' }]}>
+                <Ionicons name="document-text" size={20} color="#E24B4A" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={s.exportOptionTitle}>Export PDF</Text>
+                <Text style={s.exportOptionDesc}>Laporan siap cetak dalam format PDF</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+            </TouchableOpacity>
+            <TouchableOpacity style={s.exportOption} onPress={() => handleExport('excel')}>
+              <View style={[s.exportIcon, { backgroundColor: '#E8F5E9' }]}>
+                <Ionicons name="grid" size={20} color="#2E7D32" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={s.exportOptionTitle}>Export Excel (CSV)</Text>
+                <Text style={s.exportOptionDesc}>Data tabel yang bisa dibuka di Excel</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
+            </TouchableOpacity>
+            <TouchableOpacity style={s.exportCancel} onPress={() => setShowExportMenu(false)}>
+              <Text style={s.exportCancelText}>Batal</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {loading ? (
         <ActivityIndicator color={Colors.primary} style={{ marginTop: 40 }} />
@@ -215,11 +298,38 @@ export default function LaporanScreen() {
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Spacing.md, paddingBottom: 32 },
-  periodRow: { flexDirection: 'row', backgroundColor: Colors.white, borderRadius: Radius.md, padding: 4, marginBottom: Spacing.md },
+  topRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginBottom: Spacing.md },
+  periodRow: { flex: 1, flexDirection: 'row', backgroundColor: Colors.white, borderRadius: Radius.md, padding: 4 },
   periodBtn: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: Radius.sm - 2 },
   periodBtnActive: { backgroundColor: Colors.primary },
   periodText: { fontSize: FontSize.sm, color: Colors.textSecondary },
   periodTextActive: { color: Colors.white, fontWeight: '600' },
+  exportBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: Colors.primary, borderRadius: Radius.sm,
+    paddingHorizontal: 12, paddingVertical: 10,
+  },
+  exportBtnText: { color: Colors.white, fontSize: FontSize.sm, fontWeight: '700' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  exportSheet: {
+    backgroundColor: Colors.white,
+    borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    padding: Spacing.md, paddingBottom: 32,
+  },
+  exportSheetTitle: { fontSize: FontSize.md, fontWeight: '800', color: Colors.textPrimary, marginBottom: Spacing.md },
+  exportOption: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 14, borderTopWidth: 0.5, borderTopColor: Colors.border,
+  },
+  exportIcon: { width: 40, height: 40, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
+  exportOptionTitle: { fontSize: FontSize.base, fontWeight: '600', color: Colors.textPrimary },
+  exportOptionDesc: { fontSize: FontSize.xs, color: Colors.textMuted, marginTop: 2 },
+  exportCancel: {
+    marginTop: Spacing.md, paddingVertical: 12,
+    borderRadius: Radius.sm, backgroundColor: Colors.background,
+    alignItems: 'center',
+  },
+  exportCancelText: { fontSize: FontSize.base, color: Colors.textSecondary, fontWeight: '600' },
   summaryRow: { flexDirection: 'row', gap: Spacing.sm, marginBottom: Spacing.md },
   summaryCard: { flex: 1, backgroundColor: Colors.white, borderRadius: Radius.md, padding: Spacing.md, elevation: 1 },
   summaryValue: { fontSize: FontSize.lg, fontWeight: '700', color: Colors.primary },

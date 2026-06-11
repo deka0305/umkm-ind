@@ -19,7 +19,7 @@ const queryClient = new QueryClient({
   },
 });
 
-const SERVER_PORT = 3000;
+const SERVER_PORT = 3333;
 
 export default function RootLayout() {
   const checkSession = useAuthStore((s) => s.checkSession);
@@ -27,6 +27,7 @@ export default function RootLayout() {
   const { setServerRunning, setSyncStatus } = useServerStore();
   const stopAutoSyncRef = useRef<(() => void) | null>(null);
   const stopPushSyncRef = useRef<(() => void) | null>(null);
+  const webPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fetchMenus = useMenuStore((s) => s.fetchMenus);
   const fetchIngredients = useStokStore((s) => s.fetchIngredients);
 
@@ -39,6 +40,11 @@ export default function RootLayout() {
       fetchMenus().catch(() => {});
       fetchIngredients().catch(() => {});
       notifyDataChange();
+      // Polling 30 detik — safety net jika Supabase Realtime belum dikonfigurasi untuk tabel menus/ingredients
+      webPollRef.current = setInterval(() => {
+        fetchMenus().catch(() => {});
+        fetchIngredients().catch(() => {});
+      }, 30_000);
     } else {
       pullFromSupabase().catch(() => {});
     }
@@ -115,6 +121,7 @@ export default function RootLayout() {
       appStateSub.remove();
       supabase.removeChannel(channel);
       stopHTTPServer().catch(() => {});
+      if (webPollRef.current) { clearInterval(webPollRef.current); webPollRef.current = null; }
     };
   }, []);
 

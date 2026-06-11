@@ -45,7 +45,7 @@ function marginColor(pct: number) {
 export default function KatalogScreen() {
   const router = useRouter();
   const { menus, categories, loading, fetchMenus, fetchCategories, createMenu, updateMenu, toggleActive } = useMenuStore();
-  const { addItem, updateQty, removeItem, items } = useCartStore();
+  const { addItem, updateQty, removeItem, items, editOrderId, editOrderTable } = useCartStore();
   const [search, setSearch] = useState('');
   const [selectedCat, setSelectedCat] = useState('');
   const [mode, setMode] = useState<Mode>('order');
@@ -136,13 +136,13 @@ export default function KatalogScreen() {
       {/* ── Header ─────────────────────────────────────── */}
       <View style={styles.header}>
         <View style={styles.searchBox}>
-          <Ionicons name="search-outline" size={16} color={Colors.textMuted} />
+          <Ionicons name="search-outline" size={16} color="rgba(255,255,255,0.55)" />
           <TextInput
             style={styles.searchInput}
             placeholder="Cari menu..."
             value={search}
             onChangeText={setSearch}
-            placeholderTextColor={Colors.textMuted}
+            placeholderTextColor="rgba(255,255,255,0.55)"
           />
           {search.length > 0 && (
             <TouchableOpacity onPress={() => setSearch('')}>
@@ -179,6 +179,16 @@ export default function KatalogScreen() {
         <View style={styles.modeBanner}>
           <Ionicons name="information-circle" size={14} color={Colors.amber} />
           <Text style={styles.modeBannerText}>Mode Kelola — termasuk menu nonaktif</Text>
+        </View>
+      )}
+
+      {/* ── Edit Order Banner ───────────────────────────── */}
+      {mode === 'order' && editOrderId !== '' && (
+        <View style={styles.editOrderBanner}>
+          <Ionicons name="add-circle" size={14} color={Colors.info} />
+          <Text style={styles.editOrderBannerText}>
+            Menambahkan menu ke Order Meja {editOrderTable}
+          </Text>
         </View>
       )}
 
@@ -618,6 +628,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.md, paddingVertical: 7,
   },
   modeBannerText: { fontSize: FontSize.xs, color: Colors.amber, fontWeight: '600' },
+  editOrderBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: Colors.infoLight,
+    paddingHorizontal: Spacing.md, paddingVertical: 7,
+  },
+  editOrderBannerText: { fontSize: FontSize.xs, color: Colors.info, fontWeight: '600' },
 
   /* Category filter */
   catWrap: { backgroundColor: Colors.white, elevation: 1, shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 4 },
@@ -784,7 +800,7 @@ const cardS = StyleSheet.create({
   },
   topImg: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, width: '100%', height: '100%' },
   outOverlay: {
-    position: 'absolute', inset: 0,
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     backgroundColor: 'rgba(255,255,255,0.6)',
     justifyContent: 'center', alignItems: 'center',
   },

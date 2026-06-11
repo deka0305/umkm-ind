@@ -76,14 +76,26 @@ export async function syncPendingOrders(): Promise<void> {
   }
 }
 
-// Dipanggil langsung dari menuStore saat user create/update menu
+// Dipanggil dari syncAll dan pushPendingAll — hanya push menu yang belum tersinkron
 export async function syncMenusToSupabase(): Promise<void> {
   if (Platform.OS === 'web') return;
   const db = await getDB();
-  const menus = (await db.getAllAsync('SELECT * FROM menus')) as any[];
-  if (menus.length === 0) return;
-  const { error } = await supabase.from('menus').upsert(menus);
-  if (error) console.warn('[sync] menus:', error.message);
+  const pending = (await db.getAllAsync('SELECT * FROM menus WHERE synced = 0')) as any[];
+  if (pending.length === 0) return; // tidak ada yang pending → skip, tanpa network call
+  // Exclude kolom `synced` (lokal saja) + normalise is_active ke 0/1
+  const payload = pending.map((m: any) => {
+    const { synced, ...rest } = m;
+    return { ...rest, is_active: (m.is_active === 1 || m.is_active === true) ? 1 : 0 };
+  });
+  const { error } = await supabase.from('menus').upsert(payload);
+  if (error) {
+    console.warn('[sync] menus:', error.message);
+  } else {
+    // Tandai semua menu yang baru saja di-push sebagai synced=1
+    const ids = pending.map((m: any) => m.id);
+    const placeholders = ids.map(() => '?').join(', ');
+    await db.runAsync(`UPDATE menus SET synced = 1 WHERE id IN (${placeholders})`, ...ids);
+  }
 }
 
 // Dipanggil langsung dari stokStore saat user create/update ingredient
@@ -119,8 +131,8 @@ export async function pullFromSupabase(): Promise<void> {
     for (const m of menus ?? []) {
       await db.runAsync(
         `INSERT OR REPLACE INTO menus
-           (id, name, category_id, sell_price, hpp, is_active, stock, image_uri, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, name, category_id, sell_price, hpp, is_active, stock, image_uri, synced, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
         m.id, m.name, m.category_id, m.sell_price, m.hpp,
         m.is_active, m.stock, m.image_uri ?? null,
         m.created_at ?? new Date().toISOString()
@@ -278,6 +290,7 @@ export async function syncAll(): Promise<boolean> {
     await pullFromSupabase();
 
     // 2. Push data lokal yang belum tersinkron
+    await syncMenusToSupabase();   // retry jika inline sync gagal (misal offline saat create)
     await syncPendingOrders();
     await syncPendingBookings();
     await syncPendingStockMovements();
@@ -331,6 +344,7 @@ export async function pushPendingAll(): Promise<void> {
   if (Platform.OS === 'web') return;
   const online = await checkInternetConnection();
   if (!online) return;
+  await syncMenusToSupabase();        // menu baru/edit saat offline → retry di sini
   await syncPendingOrders();
   await syncPendingStockMovements();
   await syncPendingBookings();

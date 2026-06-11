@@ -15,6 +15,8 @@ interface CartState {
   customerId: string;
   paymentMethod: string;
   discount: number;
+  editOrderId: string;
+  editOrderTable: string;
   addItem: (item: Omit<CartItem, 'qty'>) => void;
   removeItem: (menuId: string) => void;
   updateQty: (menuId: string, qty: number) => void;
@@ -22,6 +24,7 @@ interface CartState {
   setCustomerId: (v: string) => void;
   setPaymentMethod: (v: string) => void;
   setDiscount: (v: number) => void;
+  setEditOrder: (orderId: string, tableNo: string) => void;
   clearCart: () => void;
   getSubtotal: () => number;
   getTotal: () => number;
@@ -34,6 +37,8 @@ export const useCartStore = create<CartState>((set, get) => ({
   customerId: '',
   paymentMethod: 'Tunai',
   discount: 0,
+  editOrderId: '',
+  editOrderTable: '',
 
   addItem: (item) =>
     set((state) => {
@@ -65,9 +70,10 @@ export const useCartStore = create<CartState>((set, get) => ({
   setCustomerId: (v) => set({ customerId: v }),
   setPaymentMethod: (v) => set({ paymentMethod: v }),
   setDiscount: (v) => set({ discount: v }),
+  setEditOrder: (orderId, tableNo) => set({ editOrderId: orderId, editOrderTable: tableNo }),
 
   clearCart: () =>
-    set({ items: [], tableNo: '', customerId: '', discount: 0, paymentMethod: 'Tunai' }),
+    set({ items: [], tableNo: '', customerId: '', discount: 0, paymentMethod: 'Tunai', editOrderId: '', editOrderTable: '' }),
 
   syncPrices: (menus) =>
     set((state) => ({
