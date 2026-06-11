@@ -75,39 +75,38 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     const db = await getDB();
     const id  = generateId();
 
-    let img: string | null = menu.imageUri ?? null;
-    if (img && isLocalUri(img)) {
-      const online = await checkInternetConnection();
-      if (online) {
-        const uploaded = await uploadMenuImage(img, id);
-        if (uploaded) img = uploaded;
-        else if (Platform.OS === 'web') img = null;
-      } else if (Platform.OS === 'web') {
-        img = null;
-      }
-    }
-
     if (Platform.OS === 'web') {
-      const payload: Record<string, any> = {
+      // ── Web: simpan menu dulu TANPA gambar → respond langsung ke user ──────
+      // Upload gambar dijalankan di background setelah save berhasil.
+      const payload = {
         id, name: menu.name, category_id: menu.categoryId,
         sell_price: menu.sellPrice, hpp: menu.hpp,
         is_active: menu.isActive ? 1 : 0, stock: menu.stock,
       };
-      if (img) payload.image_uri = img;
-      console.log('[createMenu web] payload:', JSON.stringify({ ...payload, image_uri: img ? '[gambar]' : undefined }));
-      let { error } = await supabase.from('menus').upsert(payload);
-      if (error) {
-        console.error('[createMenu web] upsert error:', error.code, error.message, error.details);
-        // Fallback: jika error karena kolom image_uri, coba tanpa gambar
-        if (img && (error.message.includes('image_uri') || error.code === '42703')) {
-          const { image_uri: _removed, ...payloadNoImg } = payload;
-          const res = await supabase.from('menus').upsert(payloadNoImg);
-          error = res.error;
-          if (error) console.error('[createMenu web] fallback error:', error.code, error.message);
-        }
-      }
+      const { error } = await supabase.from('menus').upsert(payload);
       if (error) throw new Error(error.message);
+
+      // Background upload — tidak blocking, UI sudah bisa jalan
+      const localImg = menu.imageUri ?? null;
+      if (localImg && isLocalUri(localImg)) {
+        Promise.race<string | null>([
+          uploadMenuImage(localImg, id).catch(() => null),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 30_000)),
+        ]).then(async (uploaded) => {
+          if (!uploaded) return;
+          try { await supabase.from('menus').update({ image_uri: uploaded }).eq('id', id); } catch {}
+          get().fetchMenus().catch(() => {});
+          notifyDataChange();
+        }).catch(() => {});
+      }
     } else {
+      // ── Android: existing logic ───────────────────────────────────────────
+      let img: string | null = menu.imageUri ?? null;
+      if (img && isLocalUri(img)) {
+        const online = await checkInternetConnection();
+        if (online) img = await uploadMenuImage(img, id).catch(() => null);
+        else img = null;
+      }
       // Android: tulis ke SQLite dulu (synced=0) → UI langsung update
       const sql = img !== null
         ? 'INSERT INTO menus (id, name, category_id, sell_price, hpp, is_active, stock, image_uri, synced) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)'
@@ -138,35 +137,42 @@ export const useMenuStore = create<MenuState>((set, get) => ({
   updateMenu: async (menu) => {
     const db = await getDB();
 
-    let img: string | null = menu.imageUri ?? null;
-    if (img && isLocalUri(img)) {
-      const online = await checkInternetConnection();
-      if (online) {
-        const uploaded = await uploadMenuImage(img, menu.id);
-        if (uploaded) img = uploaded;
-        else if (Platform.OS === 'web') img = null;
-      } else if (Platform.OS === 'web') {
-        img = null;
-      }
-    }
-
     if (Platform.OS === 'web') {
+      // ── Web: update menu dulu TANPA gambar baru → respond langsung ──────────
+      // Jika image_uri sudah https:// (dari Supabase Storage), tetap disimpan.
+      const existingImg = (menu.imageUri && !isLocalUri(menu.imageUri)) ? menu.imageUri : null;
       const payload: Record<string, any> = {
         name: menu.name, category_id: menu.categoryId,
         sell_price: menu.sellPrice, hpp: menu.hpp,
         is_active: menu.isActive ? 1 : 0, stock: menu.stock,
       };
-      if (img !== null) payload.image_uri = img;
-      let { error } = await supabase.from('menus').update(payload).eq('id', menu.id);
-      // Fallback: jika kolom image_uri belum ada, retry tanpa gambar
-      if (error && img !== null && (error.message.includes('image_uri') || error.code === '42703')) {
-        const { image_uri: _removed, ...payloadNoImg } = payload;
-        const res = await supabase.from('menus').update(payloadNoImg).eq('id', menu.id);
-        error = res.error;
-      }
+      if (existingImg) payload.image_uri = existingImg;
+      const { error } = await supabase.from('menus').update(payload).eq('id', menu.id);
       if (error) throw new Error(error.message);
+
+      // Background upload jika ada gambar lokal baru
+      const localImg = (menu.imageUri && isLocalUri(menu.imageUri)) ? menu.imageUri : null;
+      if (localImg) {
+        const menuId = menu.id;
+        Promise.race<string | null>([
+          uploadMenuImage(localImg, menuId).catch(() => null),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 30_000)),
+        ]).then(async (uploaded) => {
+          if (!uploaded) return;
+          try { await supabase.from('menus').update({ image_uri: uploaded }).eq('id', menuId); } catch {}
+          get().fetchMenus().catch(() => {});
+          notifyDataChange();
+        }).catch(() => {});
+      }
     } else {
-      // Android: update SQLite langsung (synced=0) → UI langsung update
+      // Android: resolve img dulu (upload jika lokal)
+      let img: string | null = menu.imageUri ?? null;
+      if (img && isLocalUri(img)) {
+        const online = await checkInternetConnection();
+        if (online) img = await uploadMenuImage(img, menu.id).catch(() => null);
+        else img = null;
+      }
+      // Update SQLite langsung (synced=0) → UI langsung update
       const sql = img !== null
         ? 'UPDATE menus SET name=?, category_id=?, sell_price=?, hpp=?, is_active=?, stock=?, image_uri=?, synced=0 WHERE id=?'
         : 'UPDATE menus SET name=?, category_id=?, sell_price=?, hpp=?, is_active=?, stock=?, synced=0 WHERE id=?';
