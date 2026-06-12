@@ -15,6 +15,7 @@
 import { Platform } from 'react-native';
 import { getDB, generateId } from './db';
 import { notifyDataChange } from './sync';
+import { WEBDIST } from './webdist.generated';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,10 +27,28 @@ interface HTTPRequest {
   body: string;
 }
 
+export interface ServerActivity {
+  ip: string;
+  method: string;
+  path: string;
+  time: string; // ISO timestamp
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let _server: any = null;
 let _port = 3333;
+let _onActivity: ((activity: ServerActivity) => void) | null = null;
+
+/** Daftarkan listener aktivitas request (untuk layar kontrol server). */
+export function setActivityListener(cb: ((activity: ServerActivity) => void) | null): void {
+  _onActivity = cb;
+}
+
+/** Apakah server benar-benar hidup (bukan hanya state di store). */
+export function isServerRunning(): boolean {
+  return _server !== null;
+}
 
 // ─── HTTP Utilities ───────────────────────────────────────────────────────────
 
@@ -84,6 +103,51 @@ function respond(socket: any, statusCode: number, contentType: string, body: str
 
 function json(socket: any, data: any, status = 200): void {
   respond(socket, status, 'application/json', JSON.stringify(data));
+}
+
+// Tulis body besar secara bertahap agar tidak membebani bridge RN sekaligus.
+// Untuk base64, ukuran chunk harus kelipatan 4 agar tiap potongan valid di-decode.
+function writeChunked(socket: any, data: string, encoding: string, done: () => void): void {
+  const CHUNK = 256 * 1024;
+  let i = 0;
+  const next = () => {
+    if (i >= data.length) return done();
+    const chunk = data.slice(i, i + CHUNK);
+    i += CHUNK;
+    try { socket.write(chunk, encoding, next); } catch { done(); }
+  };
+  next();
+}
+
+function respondFile(socket: any, contentType: string, body: string, encoding: 'utf8' | 'base64'): void {
+  const headers = [
+    'HTTP/1.1 200 OK',
+    'Content-Type: ' + contentType + (encoding === 'utf8' ? '; charset=utf-8' : ''),
+    'Access-Control-Allow-Origin: *',
+    'Cache-Control: no-cache',
+    'Connection: close',
+    '',
+    '',
+  ].join('\r\n');
+  try {
+    socket.write(headers, 'utf-8', () => {
+      writeChunked(socket, body, encoding === 'utf8' ? 'utf-8' : 'base64', () => {
+        try { socket.end(); } catch {}
+      });
+    });
+  } catch {}
+}
+
+// Sajikan file hasil "expo export web" (di-bundle via webdist.generated.ts).
+// Return false jika WEBDIST kosong (belum di-build) → fallback ke web UI mini.
+function serveStatic(socket: any, pathname: string): boolean {
+  const key = pathname === '/' ? '/index.html' : pathname;
+  let file = WEBDIST[key];
+  // SPA fallback: route tanpa ekstensi (mis. /laporan) → index.html
+  if (!file && !key.includes('.')) file = WEBDIST['/index.html'];
+  if (!file) return false;
+  respondFile(socket, file.mime, file.data, file.encoding);
+  return true;
 }
 
 // ─── API Handlers ─────────────────────────────────────────────────────────────
@@ -209,6 +273,42 @@ async function apiGetIngredients(socket: any): Promise<void> {
   }
 }
 
+// Eksekusi SQL generik dari web client yang disajikan server HP.
+// Web app lengkap memakai endpoint ini sebagai pengganti SQLite/Supabase.
+async function apiQuery(socket: any, body: string): Promise<void> {
+  try {
+    const { op, sql, params } = JSON.parse(body);
+    if (typeof sql !== 'string' || !sql.trim()) {
+      return json(socket, { success: false, error: 'sql wajib diisi' }, 400);
+    }
+    const db = await getDB();
+    const args: any[] = Array.isArray(params) ? params : [];
+
+    if (op === 'all') {
+      return json(socket, { success: true, rows: await db.getAllAsync(sql, ...args) });
+    }
+    if (op === 'first') {
+      return json(socket, { success: true, row: await db.getFirstAsync(sql, ...args) });
+    }
+    if (op === 'run') {
+      const r = await db.runAsync(sql, ...args);
+      notifyDataChange(); // mutasi dari web → refresh UI di HP
+      return json(socket, {
+        success: true,
+        result: { lastInsertRowId: r?.lastInsertRowId, changes: r?.changes },
+      });
+    }
+    if (op === 'exec') {
+      await db.execAsync(sql);
+      notifyDataChange();
+      return json(socket, { success: true });
+    }
+    json(socket, { success: false, error: 'op tidak dikenal: ' + op }, 400);
+  } catch (err: any) {
+    json(socket, { success: false, error: err.message }, 500);
+  }
+}
+
 // ─── Router ───────────────────────────────────────────────────────────────────
 
 async function handleRequest(socket: any, req: HTTPRequest): Promise<void> {
@@ -217,7 +317,20 @@ async function handleRequest(socket: any, req: HTTPRequest): Promise<void> {
     return;
   }
 
+  // Laporkan aktivitas ke listener (layar kontrol server)
+  if (_onActivity) {
+    try {
+      _onActivity({
+        ip: socket.remoteAddress || socket.address?.()?.address || '?',
+        method: req.method,
+        path: req.pathname,
+        time: new Date().toISOString(),
+      });
+    } catch {}
+  }
+
   // API routes
+  if (req.pathname === '/api/query' && req.method === 'POST') return apiQuery(socket, req.body);
   if (req.pathname === '/api/dashboard') return apiDashboard(socket);
   if (req.pathname === '/api/menus') return apiGetMenus(socket);
   if (req.pathname === '/api/ingredients') return apiGetIngredients(socket);
@@ -231,7 +344,10 @@ async function handleRequest(socket: any, req: HTTPRequest): Promise<void> {
     return apiPatchOrderStatus(socket, patchMatch[1], req.body);
   }
 
-  // Semua route lain → tampilkan Web UI
+  // Web app lengkap (hasil expo export, jika sudah di-build via npm run build:webdist)
+  if (serveStatic(socket, req.pathname)) return;
+
+  // Fallback: web UI mini (saat webdist belum di-build)
   respond(socket, 200, 'text/html', getWebUI());
 }
 
@@ -495,7 +611,6 @@ function getWebUI(): string {
 '      var maxVal=i.min_stock>0?i.min_stock*2:10;' +
 '      var pct=Math.min(100,Math.round((i.current_stock/maxVal)*100));' +
 '      var st=i.current_stock<=0?"Habis":i.current_stock<=i.min_stock?"Kritis":i.current_stock<=i.min_stock*1.5?"Rendah":"Aman";' +
-'      var bc=st==="Aman"?"":"st==="+"Rendah"?"warn":"danger";' +
 '      var bclass=st==="Aman"?"b-ok":st==="Rendah"?"b-warn":"b-danger";' +
 '      var barClass=st==="Aman"?"":st==="Rendah"?"warn":"danger";' +
 '      return "<div class=\\"stock-row\\">"' +

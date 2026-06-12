@@ -6,7 +6,8 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "build:webdist": "node scripts/pack-webdist.js"
   },
   "dependencies": {
     "@expo/vector-icons": "^14.0.0",
@@ -17,6 +18,7 @@
     "expo-constants": "~16.0.2",
     "expo-image-picker": "^15.0.7",
     "expo-linking": "~6.3.1",
+    "expo-network": "~6.0.1",
     "expo-print": "~13.0.1",
     "expo-router": "~3.5.0",
     "expo-sharing": "~12.0.0",
@@ -24,19 +26,19 @@
     "expo-status-bar": "~1.12.1",
     "expo-system-ui": "~3.0.7",
     "nativewind": "^2.0.11",
+    "qrcode-generator": "^2.0.4",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "react-native": "0.74.5",
     "react-native-safe-area-context": "4.10.5",
     "react-native-screens": "3.31.1",
+    "react-native-tcp-socket": "^6.2.0",
     "react-native-url-polyfill": "^2.0.0",
     "react-native-web": "~0.19.10",
     "tailwindcss": "^3.3.2",
     "typescript": "~5.3.3",
     "ws": "^8.21.0",
-    "zustand": "^4.5.0",
-    "expo-network": "~6.0.1",
-    "react-native-tcp-socket": "^6.2.0"
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",

@@ -7,8 +7,6 @@ import { useAuthStore } from '../stores/authStore';
 import { useSettingsStore } from '../stores/settingsStore';
 import { useServerStore } from '../stores/serverStore';
 import { syncAll, pullFromSupabase, startAutoSync, startPushSync, onSyncStatusChange, onPullComplete, notifyDataChange } from '../lib/sync';
-import { startHTTPServer, stopHTTPServer } from '../lib/httpServer';
-import { getLocalIP } from '../lib/networkUtils';
 import { supabase } from '../lib/supabase';
 import { useMenuStore } from '../stores/menuStore';
 import { useStokStore } from '../stores/stokStore';
@@ -19,12 +17,10 @@ const queryClient = new QueryClient({
   },
 });
 
-const SERVER_PORT = 3333;
-
 export default function RootLayout() {
   const checkSession = useAuthStore((s) => s.checkSession);
   const loadSettings = useSettingsStore((s) => s.load);
-  const { setServerRunning, setSyncStatus } = useServerStore();
+  const { setSyncStatus, startServer, stopServer, ensureServerAlive } = useServerStore();
   const stopAutoSyncRef = useRef<(() => void) | null>(null);
   const stopPushSyncRef = useRef<(() => void) | null>(null);
   const webPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -67,11 +63,13 @@ export default function RootLayout() {
       fetchIngredients().catch(() => {});
     });
 
-    // ── AppState: sync langsung saat app dibuka dari background ──────────────
-    // Ini yang paling terasa: buka app → data langsung terbaru
+    // ── AppState: sync + cek server saat app dibuka dari background ──────────
+    // Android bisa mematikan server TCP saat app di background; nyalakan ulang
+    // otomatis dan perbarui IP (bisa berubah saat ganti WiFi/hotspot).
     const handleAppState = (next: AppStateStatus) => {
       if (next === 'active') {
         syncAll().catch(() => {});
+        ensureServerAlive().catch(() => {});
       }
     };
     const appStateSub = AppState.addEventListener('change', handleAppState);
@@ -100,18 +98,8 @@ export default function RootLayout() {
         }
       });
 
-    // HTTP server lokal
-    (async () => {
-      try {
-        const result = await startHTTPServer(SERVER_PORT);
-        if (result) {
-          const ip = await getLocalIP();
-          setServerRunning(true, ip, result.port);
-        }
-      } catch {
-        setServerRunning(false);
-      }
-    })();
+    // HTTP server lokal — otomatis nyala saat app dibuka (Android saja)
+    startServer().catch(() => {});
 
     return () => {
       stopPushSyncRef.current?.();
@@ -120,7 +108,7 @@ export default function RootLayout() {
       unsubPull();
       appStateSub.remove();
       supabase.removeChannel(channel);
-      stopHTTPServer().catch(() => {});
+      stopServer().catch(() => {});
       if (webPollRef.current) { clearInterval(webPollRef.current); webPollRef.current = null; }
     };
   }, []);
@@ -130,6 +118,7 @@ export default function RootLayout() {
       <StatusBar style="dark" />
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="server" options={{ title: 'Server Lokal', headerBackTitle: 'Kembali' }} />
         <Stack.Screen name="order/cart" options={{ title: 'Order Baru', headerBackTitle: 'Kembali' }} />
         <Stack.Screen name="order/booking" options={{ title: 'Booking', headerBackTitle: 'Kembali' }} />
         <Stack.Screen name="po/index" options={{ title: 'Purchase Order', headerBackTitle: 'Kembali' }} />

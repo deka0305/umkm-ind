@@ -10,11 +10,20 @@ export interface AppDB {
 
 let _db: AppDB | null = null;
 
+/**
+ * Apakah web ini disajikan oleh server lokal HP (port 3333)?
+ * Jika ya, semua query data dialihkan ke SQLite di HP via API lokal —
+ * jalan tanpa internet dan datanya sama dengan yang di HP.
+ */
+export function isPhoneClient(): boolean {
+  return Platform.OS === 'web' && typeof window !== 'undefined' && window.location.port === '3333';
+}
+
 export async function getDB(): Promise<AppDB> {
   if (_db) return _db;
 
   if (Platform.OS === 'web') {
-    _db = new SupabaseDB();
+    _db = isPhoneClient() ? new RemoteSQLiteDB() : new SupabaseDB();
     return _db;
   }
 
@@ -76,6 +85,38 @@ function lsUpdate(table: string, updates: Record<string, any>, whereCol: string,
 
 // Tabel yang belum ada di Supabase (fallback ke localStorage)
 const LS_TABLES = new Set<string>();
+
+// ─── Remote SQLite Adapter (web yang disajikan server HP) ────────────────────
+// Meneruskan SQL apa adanya ke HP via POST /api/query — dieksekusi di SQLite HP.
+
+class RemoteSQLiteDB implements AppDB {
+  private async call(op: string, sql: string, params: any[]): Promise<any> {
+    const res = await fetch('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op, sql, params }),
+    });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.error || 'Query ke server HP gagal');
+    return json;
+  }
+
+  async getAllAsync<T = any>(sql: string, ...params: any[]): Promise<T[]> {
+    return (await this.call('all', sql, params)).rows ?? [];
+  }
+
+  async getFirstAsync<T = any>(sql: string, ...params: any[]): Promise<T | null> {
+    return (await this.call('first', sql, params)).row ?? null;
+  }
+
+  async runAsync(sql: string, ...params: any[]): Promise<any> {
+    return (await this.call('run', sql, params)).result;
+  }
+
+  async execAsync(sql: string): Promise<any> {
+    await this.call('exec', sql, []);
+  }
+}
 
 // ─── Supabase DB Adapter (web) ────────────────────────────────────────────────
 

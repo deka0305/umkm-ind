@@ -46,6 +46,7 @@ function todayStr() {
 
 // Widget status + tombol sinkron manual (tampil di web dan Android)
 function ServerStatusWidget({ onSync }: { onSync: () => Promise<void> }) {
+  const router = useRouter();
   const { serverRunning, serverURL, syncStatus, lastSync } = useServerStore();
   const [syncing, setSyncing] = useState(false);
   const [doneAt, setDoneAt]   = useState<Date | null>(null);
@@ -96,6 +97,10 @@ function ServerStatusWidget({ onSync }: { onSync: () => Promise<void> }) {
             ) : (
               <Text style={[sw.url, { color: Colors.textMuted }]}>Tidak aktif</Text>
             )}
+            <TouchableOpacity onPress={() => router.push('/server')} style={sw.manageBtn}>
+              <Ionicons name="qr-code-outline" size={13} color={Colors.white} />
+              <Text style={sw.manageBtnText}>Kelola</Text>
+            </TouchableOpacity>
           </View>
           <View style={sw.divider} />
         </>
@@ -126,7 +131,7 @@ function ServerStatusWidget({ onSync }: { onSync: () => Promise<void> }) {
 
       {Platform.OS !== 'web' && serverRunning && serverURL && (
         <Text style={sw.hint}>
-          Buka <Text style={{ color: Colors.primary }}>{serverURL}</Text> di browser perangkat lain (WiFi sama)
+          Ketuk <Text style={{ color: Colors.primary, fontWeight: '700' }}>Kelola</Text> untuk QR code — perangkat lain tinggal scan (WiFi/hotspot sama)
         </Text>
       )}
     </View>
@@ -156,6 +161,8 @@ const sw = StyleSheet.create({
   syncText:       { fontSize: 12, fontWeight: '600', flex: 1 },
   lastSync:       { fontSize: 11, color: Colors.textMuted },
   hint:           { fontSize: 11, color: Colors.textMuted, marginTop: 6, lineHeight: 15 },
+  manageBtn:      { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.primary, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  manageBtnText:  { fontSize: 11, color: Colors.white, fontWeight: '700' },
   syncBtn:        { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.primary, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, marginLeft: 4 },
   syncBtnDisabled:{ backgroundColor: Colors.textMuted },
   syncBtnText:    { fontSize: 12, color: Colors.white, fontWeight: '600' },

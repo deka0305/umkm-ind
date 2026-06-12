@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import { create } from 'zustand';
-import { getDB, generateId } from '../lib/db';
+import { getDB, generateId, isPhoneClient } from '../lib/db';
 import { useCartStore } from './cartStore';
 import { notifyDataChange } from '../lib/sync';
 import { supabase } from '../lib/supabase';
@@ -75,7 +75,7 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     const db = await getDB();
     const id  = generateId();
 
-    if (Platform.OS === 'web') {
+    if (Platform.OS === 'web' && !isPhoneClient()) {
       // ── Web: simpan menu dulu TANPA gambar → respond langsung ke user ──────
       // Upload gambar dijalankan di background setelah save berhasil.
       const payload = {
@@ -137,7 +137,7 @@ export const useMenuStore = create<MenuState>((set, get) => ({
   updateMenu: async (menu) => {
     const db = await getDB();
 
-    if (Platform.OS === 'web') {
+    if (Platform.OS === 'web' && !isPhoneClient()) {
       // ── Web: update menu dulu TANPA gambar baru → respond langsung ──────────
       // Jika image_uri sudah https:// (dari Supabase Storage), tetap disimpan.
       const existingImg = (menu.imageUri && !isLocalUri(menu.imageUri)) ? menu.imageUri : null;
@@ -200,7 +200,7 @@ export const useMenuStore = create<MenuState>((set, get) => ({
   toggleActive: async (id) => {
     const db = await getDB();
 
-    if (Platform.OS === 'web') {
+    if (Platform.OS === 'web' && !isPhoneClient()) {
       const { data } = await supabase.from('menus').select('is_active').eq('id', id).single();
       if (data) {
         const { error } = await supabase.from('menus').update({ is_active: !data.is_active }).eq('id', id);
