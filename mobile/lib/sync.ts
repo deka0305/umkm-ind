@@ -161,6 +161,11 @@ export async function pullFromSupabase(): Promise<void> {
     .limit(100);
   if (!orderErr) {
     for (const o of orders ?? []) {
+      // Jangan timpa order yang punya perubahan lokal belum tersinkron (synced=0)
+      const local = await db.getFirstAsync(
+        'SELECT synced FROM orders WHERE id = ?', o.id
+      ) as { synced: number } | null;
+      if (local?.synced === 0) continue;
       await db.runAsync(
         `INSERT OR REPLACE INTO orders
            (id, customer_id, table_no, status, payment_method,
@@ -349,7 +354,8 @@ export async function pushPendingAll(): Promise<void> {
   await syncPendingStockMovements();
   await syncPendingBookings();
   await syncPendingPurchaseOrders();
-  _pullListeners.forEach((cb) => cb()); // beritahu UI setelah push selesai
+  // Tidak perlu notify _pullListeners — push hanya mengirim data yang sudah ada
+  // di SQLite lokal. UI sudah diupdate sebelum push terjadi.
 }
 
 export function startPushSync(intervalMs = 3_000): () => void {

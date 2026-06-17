@@ -7,6 +7,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { getDB, resetAllData } from '../../lib/db';
 import { onPullComplete, manualSync } from '../../lib/sync';
+import { supabase } from '../../lib/supabase';
 import { useCartStore } from '../../stores/cartStore';
 import { useMenuStore } from '../../stores/menuStore';
 import { useStokStore } from '../../stores/stokStore';
@@ -338,8 +339,15 @@ export default function DashboardScreen() {
   async function markSelesai(orderId: string) {
     try {
       const db = await getDB();
-      await db.runAsync(`UPDATE orders SET status = ? WHERE id = ?`, 'selesai', orderId);
+      // Mark unsynced dulu supaya pull sync tidak menimpa sebelum push selesai
+      await db.runAsync(`UPDATE orders SET status = ?, synced = 0 WHERE id = ?`, 'selesai', orderId);
       await loadData();
+      // Push langsung ke Supabase tanpa tunggu push sync 3s
+      supabase.from('orders').update({ status: 'selesai' }).eq('id', orderId)
+        .then(({ error }) => {
+          if (!error) db.runAsync('UPDATE orders SET synced = 1 WHERE id = ?', orderId).catch(() => {});
+        })
+        .catch(() => {});
     } catch {
       Alert.alert('Gagal', 'Tidak dapat mengubah status order');
     }
@@ -359,7 +367,7 @@ export default function DashboardScreen() {
           `SELECT id, name, current_stock, unit, min_stock FROM ingredients WHERE current_stock <= min_stock ORDER BY current_stock ASC LIMIT 5`
         ),
         db.getAllAsync<any>(
-          `SELECT id, table_no, total, status, created_at FROM orders ORDER BY created_at DESC LIMIT 8`
+          `SELECT id, table_no, total, status, created_at, note FROM orders ORDER BY created_at DESC LIMIT 8`
         ),
         db.getFirstAsync<{ cnt: number }>(
           `SELECT COUNT(*) as cnt FROM orders WHERE status='pending'`
@@ -375,7 +383,7 @@ export default function DashboardScreen() {
           currentStock: r.current_stock, unit: r.unit, minStock: r.min_stock,
         })),
         orderTerbaru: orderRows.map((r) => ({
-          id: r.id, tableNo: r.table_no, total: r.total, status: r.status, createdAt: r.created_at,
+          id: r.id, tableNo: r.table_no, total: r.total, status: r.status, createdAt: r.created_at, note: r.note ?? '',
         })),
         topMenu: [],
       });
@@ -586,6 +594,9 @@ export default function DashboardScreen() {
                 <View style={{ flex: 1 }}>
                   <Text style={s.orderTable}>Meja {order.tableNo || '-'}</Text>
                   <Text style={s.orderTime}>{timeStr || '-'}</Text>
+                  {!!order.note && (
+                    <Text style={s.orderNote} numberOfLines={1}>📝 {order.note}</Text>
+                  )}
                 </View>
                 <View style={{ alignItems: 'flex-end', gap: 3 }}>
                   <Text style={s.orderTotal}>{formatRupiah(order.total)}</Text>
@@ -965,6 +976,7 @@ const s = StyleSheet.create({
   orderIconWrap: { width: 34, height: 34, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
   orderTable: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
   orderTime: { fontSize: FontSize.xs, color: Colors.textMuted, marginTop: 1 },
+  orderNote: { fontSize: FontSize.xs, color: Colors.amber, marginTop: 2, fontStyle: 'italic' },
   orderTotal: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.textPrimary },
   badge: { borderRadius: Radius.full, paddingHorizontal: 8, paddingVertical: 2 },
   badgeText: { fontSize: 10, fontWeight: '700' },

@@ -105,7 +105,7 @@ export default function TabsLayout() {
       }}
     >
       <Tabs.Screen name="index"   options={{ title: 'Dashboard' }} />
-      <Tabs.Screen name="katalog" options={{ title: 'Katalog Menu' }} />
+      <Tabs.Screen name="katalog" options={{ title: 'Menu' }} />
       <Tabs.Screen name="stok"    options={{ title: 'Manajemen Stok' }} />
       <Tabs.Screen name="hpp"     options={{ title: 'Kalkulator HPP' }} />
       <Tabs.Screen name="laporan" options={{ title: 'Laporan' }} />

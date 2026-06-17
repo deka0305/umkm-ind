@@ -4,6 +4,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getDB } from '../../lib/db';
+import { supabase } from '../../lib/supabase';
 import { formatRupiah } from '../../lib/hpp-calculator';
 import { exportToPDF, exportToExcel, ReportData } from '../../lib/exportReport';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -14,6 +15,7 @@ type Period = 'hari' | 'minggu' | 'bulan' | 'tahun';
 interface RevenuePoint { tanggal: string; revenue: number; jmlOrder: number }
 interface TopMenu { name: string; qty: number; revenue: number }
 interface OrderRow { id: string; tableNo: string; total: number; status: string; paymentMethod: string; createdAt: string }
+interface PayBreakdown { method: string; count: number; total: number }
 
 const STATUS_COLOR: Record<string, { label: string; color: string; bg: string }> = {
   pending:  { label: 'Menunggu', color: Colors.amber,   bg: Colors.amberLight },
@@ -30,6 +32,7 @@ export default function LaporanScreen() {
   const [topMenus, setTopMenus] = useState<TopMenu[]>([]);
   const [totalRevenue, setTotalRevenue] = useState(0);
   const [totalOrder, setTotalOrder] = useState(0);
+  const [payBreakdown, setPayBreakdown] = useState<PayBreakdown[]>([]);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
@@ -87,6 +90,18 @@ export default function LaporanScreen() {
         id: r.id, tableNo: r.table_no, total: r.total, status: r.status,
         paymentMethod: r.payment_method, createdAt: r.created_at ?? '',
       })));
+
+      const payRows = await db.getAllAsync<any>(
+        `SELECT payment_method, COUNT(*) as count, SUM(total) as total
+         FROM orders WHERE status='selesai' AND date(created_at) BETWEEN ? AND ?
+         GROUP BY payment_method ORDER BY total DESC`,
+        startDate, endDate
+      );
+      setPayBreakdown(payRows.map((r) => ({
+        method: r.payment_method || 'Tidak diketahui',
+        count: r.count,
+        total: r.total,
+      })));
     } finally {
       setLoading(false);
     }
@@ -125,8 +140,13 @@ export default function LaporanScreen() {
 
   async function updateStatus(id: string, status: string) {
     const db = await getDB();
-    await db.runAsync(`UPDATE orders SET status = ? WHERE id = ?`, status, id);
+    await db.runAsync(`UPDATE orders SET status = ?, synced = 0 WHERE id = ?`, status, id);
     await loadData();
+    supabase.from('orders').update({ status }).eq('id', id)
+      .then(({ error }) => {
+        if (!error) db.runAsync('UPDATE orders SET synced = 1 WHERE id = ?', id).catch(() => {});
+      })
+      .catch(() => {});
   }
 
   function confirmStatus(id: string, status: string, label: string) {
@@ -252,6 +272,26 @@ export default function LaporanScreen() {
             )}
           </View>
 
+          {payBreakdown.length > 0 && (
+            <View style={s.card}>
+              <Text style={s.cardTitle}>Metode Pembayaran</Text>
+              {payBreakdown.map((p) => (
+                <View key={p.method} style={s.payRow}>
+                  <View style={s.payLeft}>
+                    <Text style={s.payMethod}>{p.method}</Text>
+                    <Text style={s.payCount}>{p.count} transaksi</Text>
+                  </View>
+                  <View style={s.payRight}>
+                    <Text style={s.payTotal}>{formatRupiah(p.total)}</Text>
+                    <Text style={s.payPct}>
+                      {totalRevenue > 0 ? `${Math.round((p.total / totalRevenue) * 100)}%` : '-'}
+                    </Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
           <View style={s.card}>
             <Text style={s.cardTitle}>Manajemen Order</Text>
             {orders.length === 0 ? (
@@ -349,6 +389,13 @@ const s = StyleSheet.create({
   menuName: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
   menuQty: { fontSize: FontSize.xs, color: Colors.textMuted },
   menuRevenue: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
+  payRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderTopWidth: 0.5, borderTopColor: Colors.border },
+  payLeft: { flex: 1 },
+  payMethod: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
+  payCount: { fontSize: FontSize.xs, color: Colors.textMuted, marginTop: 1 },
+  payRight: { alignItems: 'flex-end' },
+  payTotal: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.textPrimary },
+  payPct: { fontSize: FontSize.xs, color: Colors.primary, fontWeight: '600', marginTop: 1 },
   orderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderTopWidth: 0.5, borderTopColor: Colors.border },
   orderTable: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
   orderMeta: { fontSize: FontSize.xs, color: Colors.textMuted, marginTop: 2 },

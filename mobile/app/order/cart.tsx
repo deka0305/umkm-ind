@@ -16,6 +16,7 @@ import { formatRupiah } from '../../lib/hpp-calculator';
 import { ReceiptData } from '../../lib/printReceipt';
 import ReceiptModal from '../../components/ReceiptModal';
 import { Colors, FontSize, Spacing, Radius } from '../../constants/theme';
+import { useMenuStore } from '@/stores/menuStore';
 
 const PAYMENT_METHODS = [
   { key: 'Tunai',       icon: 'cash-outline'          },
@@ -132,6 +133,11 @@ export default function CartScreen() {
           `INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal)
            VALUES (?, ?, ?, ?, ?, ?)`,
           item.itemId, newOrderId, item.menuId, item.qty, item.price, item.price * item.qty
+        );
+        // Kurangi stok menu; synced=0 agar push sync kirim ke Supabase
+        await db.runAsync(
+          'UPDATE menus SET stock = MAX(0, stock - ?), synced = 0 WHERE id = ?',
+          item.qty, item.menuId
         );
       }
 
@@ -265,7 +271,7 @@ export default function CartScreen() {
             ? `Tambahkan menu ke Order Meja ${editOrderTable}`
             : 'Tambahkan menu dari katalog untuk mulai order'}
         </Text>
-        <TouchableOpacity style={s.backBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={s.backBtn} onPress={() => router.push('/(tabs)/katalog')}>
           <Ionicons name="restaurant-outline" size={16} color={Colors.white} />
           <Text style={s.backBtnText}>Pilih Menu</Text>
         </TouchableOpacity>
@@ -321,26 +327,36 @@ export default function CartScreen() {
 
         {/* ── Info Order ───────────────────────────── */}
         <View style={s.card}>
-          <Text style={s.cardTitle}>Info Order</Text>
-          <View style={s.inputGroup}>
+          <View style={s.cardTitleRow}>
+            <Text style={s.cardTitle}>Info Order</Text>
+            {isEditMode && (
+              <View style={s.lockedBadge}>
+                <Ionicons name="lock-closed" size={11} color={Colors.textMuted} />
+                <Text style={s.lockedBadgeText}>Tidak dapat diubah</Text>
+              </View>
+            )}
+          </View>
+          <View style={[s.inputGroup, isEditMode && s.inputGroupDisabled]}>
             <Ionicons name="grid-outline" size={16} color={Colors.textMuted} />
             <TextInput
-              style={s.inputField}
+              style={[s.inputField, isEditMode && s.inputFieldDisabled]}
               placeholder="Nomor meja (opsional)"
               value={tableNo}
               onChangeText={setTableNo}
               placeholderTextColor={Colors.textMuted}
+              editable={!isEditMode}
             />
           </View>
-          <View style={[s.inputGroup, { alignItems: 'flex-start', paddingTop: 10 }]}>
+          <View style={[s.inputGroup, { alignItems: 'flex-start', paddingTop: 10 }, isEditMode && s.inputGroupDisabled]}>
             <Ionicons name="chatbubble-outline" size={16} color={Colors.textMuted} style={{ marginTop: 2 }} />
             <TextInput
-              style={[s.inputField, { height: 64, textAlignVertical: 'top' }]}
+              style={[s.inputField, { height: 64, textAlignVertical: 'top' }, isEditMode && s.inputFieldDisabled]}
               placeholder="Catatan pesanan (opsional)"
               multiline
               value={note}
               onChangeText={setNote}
               placeholderTextColor={Colors.textMuted}
+              editable={!isEditMode}
             />
           </View>
         </View>
@@ -529,6 +545,9 @@ const s = StyleSheet.create({
     elevation: 1, shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 6, shadowOffset: { width: 0, height: 2 },
   },
   cardTitle: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.textSecondary, marginBottom: Spacing.sm },
+  cardTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.sm },
+  lockedBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.border, borderRadius: 99, paddingHorizontal: 8, paddingVertical: 3 },
+  lockedBadgeText: { fontSize: 10, color: Colors.textMuted, fontWeight: '600' },
 
   /* Items */
   itemRow: {
@@ -550,7 +569,9 @@ const s = StyleSheet.create({
     borderWidth: 1, borderColor: Colors.border, borderRadius: Radius.sm,
     paddingHorizontal: 12, marginBottom: 8, backgroundColor: Colors.background,
   },
+  inputGroupDisabled: { backgroundColor: Colors.border, borderColor: Colors.border, opacity: 0.7 },
   inputField: { flex: 1, fontSize: FontSize.sm, color: Colors.textPrimary, paddingVertical: 11 },
+  inputFieldDisabled: { color: Colors.textMuted },
 
   /* Payment */
   payGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
