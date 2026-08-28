@@ -4,22 +4,50 @@ import { supabase } from './supabase';
 
 export type PickImageResult = { uri: string } | null;
 
-export async function pickImageFromGallery(): Promise<PickImageResult> {
-  if (Platform.OS !== 'web') {
-    const { status } = await ExpoImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Izin Diperlukan', 'Izin akses galeri diperlukan untuk memilih foto menu.');
-      return null;
-    }
+/**
+ * @param asDataUri simpan hasil sebagai data URI, bukan file:// — untuk gambar
+ *   yang disimpan permanen di AsyncStorage (mis. QRIS), karena file:// dari
+ *   galeri berada di cache app dan bisa dihapus Android sewaktu-waktu.
+ */
+export async function pickImageFromGallery(asDataUri = false): Promise<PickImageResult> {
+  if (Platform.OS === 'web') {
+    // Web: <input type="file"> native — expo-image-picker tidak reliable di browser
+    return new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = (e) => {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (!file) { resolve(null); return; }
+        const reader = new FileReader();
+        reader.onload = (ev) => resolve({ uri: ev.target?.result as string });
+        reader.readAsDataURL(file);
+      };
+      input.addEventListener('cancel', () => resolve(null));
+      input.click();
+    });
+  }
+
+  const { status } = await ExpoImagePicker.requestMediaLibraryPermissionsAsync();
+  if (status !== 'granted') {
+    Alert.alert('Izin Diperlukan', 'Izin akses galeri diperlukan untuk memilih foto menu.');
+    return null;
   }
   const result = await ExpoImagePicker.launchImageLibraryAsync({
     mediaTypes: ExpoImagePicker.MediaTypeOptions.Images,
-    allowsEditing: true,
+    // Crop 4:3 hanya untuk foto menu. Gambar QRIS jangan dipotong —
+    // QR yang terpotong tidak bisa dipindai.
+    allowsEditing: !asDataUri,
     aspect: [4, 3],
-    quality: 0.7,
+    quality: asDataUri ? 0.9 : 0.7,
+    base64: asDataUri,
   });
   if (!result.canceled && result.assets[0]) {
-    return { uri: result.assets[0].uri };
+    const asset = result.assets[0];
+    if (asDataUri && asset.base64) {
+      return { uri: `data:${asset.mimeType ?? 'image/jpeg'};base64,${asset.base64}` };
+    }
+    return { uri: asset.uri };
   }
   return null;
 }

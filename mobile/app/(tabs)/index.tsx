@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Platform, RefreshControl, Modal, TextInput, Alert, Clipboard,
+  ActivityIndicator, Platform, RefreshControl, Modal, TextInput, Alert, Clipboard, Image,
 } from 'react-native';
+import { pickImageFromGallery } from '../../lib/imagePicker';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { getDB, resetAllData } from '../../lib/db';
@@ -172,7 +173,7 @@ const sw = StyleSheet.create({
 export default function DashboardScreen() {
   const router = useRouter();
   const { clearCart, setEditOrder } = useCartStore();
-  const { ppn, namaUsaha, alamat, noTelp, save: saveSettings } = useSettingsStore();
+  const { ppn, namaUsaha, alamat, noTelp, qrisImage, save: saveSettings } = useSettingsStore();
   const [data, setData] = useState<DashboardData>({
     totalOrder: 0, pendapatan: 0, orderPending: 0, stokKritis: [], orderTerbaru: [], topMenu: [],
   });
@@ -181,6 +182,7 @@ export default function DashboardScreen() {
   const [showSettings, setShowSettings] = useState(false);
   const [formPpn, setFormPpn] = useState(String(ppn));
   const [formNama, setFormNama] = useState(namaUsaha);
+  const [formQris, setFormQris] = useState(qrisImage);
 
   // ── Detail stok ───────────────────────────────────────────────────────────
   const [stokModal, setStokModal] = useState(false);
@@ -281,7 +283,13 @@ export default function DashboardScreen() {
   function openSettings() {
     setFormPpn(String(ppn));
     setFormNama(namaUsaha);
+    setFormQris(qrisImage);
     setShowSettings(true);
+  }
+
+  async function pickQris() {
+    const picked = await pickImageFromGallery(true);
+    if (picked) setFormQris(picked.uri);
   }
 
   function handleSaveSettings() {
@@ -290,7 +298,7 @@ export default function DashboardScreen() {
       Alert.alert('PPN tidak valid', 'Masukkan angka antara 0 – 100');
       return;
     }
-    saveSettings({ ppn: parsed, namaUsaha: formNama.trim() || 'UMKM Pro' });
+    saveSettings({ ppn: parsed, namaUsaha: formNama.trim() || 'UMKM Pro', qrisImage: formQris });
     setShowSettings(false);
   }
 
@@ -846,6 +854,30 @@ export default function DashboardScreen() {
             ))}
           </View>
 
+          {/* Gambar QRIS statis — ditampilkan ke pelanggan saat metode bayar QRIS */}
+          <Text style={s.settingsLabel}>Gambar QRIS</Text>
+          {formQris ? (
+            <View style={s.qrisPreviewBox}>
+              <Image source={{ uri: formQris }} style={s.qrisPreview} resizeMode="contain" />
+              <View style={s.qrisActions}>
+                <TouchableOpacity style={s.qrisActionBtn} onPress={pickQris}>
+                  <Ionicons name="swap-horizontal-outline" size={16} color={Colors.primary} />
+                  <Text style={s.qrisActionText}>Ganti</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.qrisActionBtn} onPress={() => setFormQris('')}>
+                  <Ionicons name="trash-outline" size={16} color={Colors.danger} />
+                  <Text style={[s.qrisActionText, { color: Colors.danger }]}>Hapus</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <TouchableOpacity style={s.qrisEmptyBox} onPress={pickQris}>
+              <Ionicons name="qr-code-outline" size={28} color={Colors.textMuted} />
+              <Text style={s.qrisEmptyText}>Unggah gambar QRIS merchant</Text>
+              <Text style={s.qrisEmptyHint}>Tampil otomatis saat pelanggan bayar pakai QRIS</Text>
+            </TouchableOpacity>
+          )}
+
           <TouchableOpacity style={s.settingsSaveBtn} onPress={handleSaveSettings}>
             <Ionicons name="checkmark-circle" size={18} color={Colors.white} />
             <Text style={s.settingsSaveBtnText}>Simpan Pengaturan</Text>
@@ -1082,6 +1114,22 @@ const s = StyleSheet.create({
   },
 
   /* Save button */
+  /* QRIS */
+  qrisPreviewBox: {
+    borderWidth: 1, borderColor: Colors.border, borderRadius: Radius.md,
+    padding: Spacing.sm, alignItems: 'center', gap: Spacing.sm,
+  },
+  qrisPreview: { width: '100%', height: 220, borderRadius: Radius.sm },
+  qrisActions: { flexDirection: 'row', gap: Spacing.md },
+  qrisActionBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, padding: Spacing.xs },
+  qrisActionText: { color: Colors.primary, fontSize: FontSize.sm, fontWeight: '600' },
+  qrisEmptyBox: {
+    borderWidth: 1, borderColor: Colors.border, borderStyle: 'dashed',
+    borderRadius: Radius.md, padding: Spacing.lg, alignItems: 'center', gap: 4,
+  },
+  qrisEmptyText: { color: Colors.textPrimary, fontSize: FontSize.sm, fontWeight: '600' },
+  qrisEmptyHint: { color: Colors.textMuted, fontSize: FontSize.xs, textAlign: 'center' },
+
   settingsSaveBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     backgroundColor: Colors.primary, borderRadius: Radius.md,

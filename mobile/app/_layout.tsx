@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { AppState, AppStateStatus, Platform } from 'react-native';
+import { Alert, AppState, AppStateStatus, Platform } from 'react-native';
 import { Stack } from 'expo-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { StatusBar } from 'expo-status-bar';
@@ -10,6 +10,23 @@ import { syncAll, pullFromSupabase, startAutoSync, startPushSync, onSyncStatusCh
 import { supabase } from '../lib/supabase';
 import { useMenuStore } from '../stores/menuStore';
 import { useStokStore } from '../stores/stokStore';
+
+// Alert.alert di react-native-web adalah no-op (`static alert() {}`) — semua pesan
+// error/konfirmasi hilang tanpa jejak di browser. Patch sekali di sini supaya
+// ke-36 pemanggilan Alert.alert di seluruh app ikut bekerja di web.
+if (Platform.OS === 'web') {
+  Alert.alert = (title, message, buttons) => {
+    const text = message ? `${title}\n\n${message}` : title;
+    if (!buttons || buttons.length <= 1) {
+      window.alert(text);
+      buttons?.[0]?.onPress?.();
+      return;
+    }
+    const confirmBtn = [...buttons].reverse().find((b) => b.style !== 'cancel') ?? buttons[buttons.length - 1];
+    if (window.confirm(text)) confirmBtn.onPress?.();
+    else buttons.find((b) => b.style === 'cancel')?.onPress?.();
+  };
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {

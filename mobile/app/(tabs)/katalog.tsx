@@ -479,7 +479,7 @@ interface MenuCardProps {
   menu: Menu;
   categories: { id: string; name: string }[];
   items: { menuId: string; qty: number }[];
-  addItem: (item: { menuId: string; name: string; price: number }) => void;
+  addItem: (item: { menuId: string; name: string; price: number; stock: number }) => void;
   updateQty: (menuId: string, qty: number) => void;
   removeItem: (menuId: string) => void;
 }
@@ -561,7 +561,7 @@ function MenuCard({ menu, categories, items, addItem, updateQty, removeItem }: M
         ) : (
           <TouchableOpacity
             style={[cardS.addBtn, isOut && cardS.addBtnDisabled]}
-            onPress={() => !isOut && addItem({ menuId: menu.id, name: menu.name, price: menu.sellPrice })}
+            onPress={() => !isOut && addItem({ menuId: menu.id, name: menu.name, price: menu.sellPrice, stock: menu.stock })}
             disabled={isOut}
           >
             {isOut

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  TextInput, ScrollView, Alert, Modal,
+  TextInput, ScrollView, Alert, Modal, Image,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -42,7 +42,7 @@ export default function CartScreen() {
   const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
 
-  const { ppn, namaUsaha, alamat, noTelp } = useSettingsStore();
+  const { ppn, namaUsaha, alamat, noTelp, qrisImage } = useSettingsStore();
   const subtotal = getSubtotal();
   const tax = subtotal * (ppn / 100);
   const total = getTotal();
@@ -53,17 +53,32 @@ export default function CartScreen() {
     try {
       const db = await getDB();
 
-      // Ambil harga terkini dari database untuk setiap item di cart
-      const freshPrices: Record<string, { name: string; price: number }> = {};
+      // Ambil harga + stok terkini dari database untuk setiap item di cart
+      const freshPrices: Record<string, { name: string; price: number; stock?: number }> = {};
       await Promise.all(
         items.map(async (item) => {
           const row = (await db.getFirstAsync(
-            'SELECT name, sell_price FROM menus WHERE id = ?',
+            'SELECT name, sell_price, stock FROM menus WHERE id = ?',
             item.menuId
           )) as any;
-          if (row) freshPrices[item.menuId] = { name: row.name, price: row.sell_price };
+          if (row) freshPrices[item.menuId] = { name: row.name, price: row.sell_price, stock: row.stock };
         })
       );
+
+      // Stok bisa berkurang setelah item masuk keranjang (mis. order dari
+      // perangkat staf lain lewat server lokal) — cek ulang sebelum simpan.
+      const shortStock = items.filter((i) => {
+        const stock = freshPrices[i.menuId]?.stock;
+        return stock !== undefined && i.qty > stock;
+      });
+      if (shortStock.length > 0) {
+        const detail = shortStock
+          .map((i) => `• ${i.name}: diminta ${i.qty}, stok ${freshPrices[i.menuId].stock}`)
+          .join('\n');
+        setLoading(null);
+        Alert.alert('Stok Tidak Cukup', `Order tidak bisa disimpan:\n\n${detail}\n\nKurangi jumlah pesanan.`);
+        return;
+      }
 
       // Deteksi perubahan harga
       const changed = items.filter(
@@ -384,6 +399,27 @@ export default function CartScreen() {
               );
             })}
           </View>
+
+          {/* QRIS statis merchant — pelanggan pindai, nominal diketik sendiri */}
+          {paymentMethod === 'QRIS' && (
+            qrisImage ? (
+              <View style={s.qrisBox}>
+                <Image source={{ uri: qrisImage }} style={s.qrisImg} resizeMode="contain" />
+                <Text style={s.qrisTotal}>{formatRupiah(total)}</Text>
+                <Text style={s.qrisHint}>
+                  Minta pelanggan memindai QR ini dan memasukkan nominal di atas.
+                  Pastikan uang masuk sebelum menekan Bayar.
+                </Text>
+              </View>
+            ) : (
+              <View style={s.qrisBox}>
+                <Ionicons name="qr-code-outline" size={28} color={Colors.textMuted} />
+                <Text style={s.qrisHint}>
+                  Gambar QRIS belum diunggah. Buka Dashboard → Pengaturan → Gambar QRIS.
+                </Text>
+              </View>
+            )
+          )}
         </View>
 
         {/* ── Ringkasan Pembayaran ─────────────────── */}
@@ -575,6 +611,13 @@ const s = StyleSheet.create({
 
   /* Payment */
   payGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  qrisBox: {
+    marginTop: Spacing.md, padding: Spacing.md, alignItems: 'center', gap: Spacing.sm,
+    borderWidth: 1, borderColor: Colors.border, borderRadius: Radius.md,
+  },
+  qrisImg: { width: '100%', height: 260, borderRadius: Radius.sm },
+  qrisTotal: { fontSize: FontSize.xl, fontWeight: '800', color: Colors.primary },
+  qrisHint: { fontSize: FontSize.xs, color: Colors.textMuted, textAlign: 'center' },
   payBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     borderWidth: 1.5, borderColor: Colors.border, borderRadius: Radius.sm,

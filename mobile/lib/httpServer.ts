@@ -16,6 +16,7 @@ import { Platform } from 'react-native';
 import { getDB, generateId } from './db';
 import { notifyDataChange } from './sync';
 import { WEBDIST } from './webdist.generated';
+import { useSettingsStore } from '../stores/settingsStore';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -193,6 +194,17 @@ async function apiGetMenus(socket: any): Promise<void> {
   }
 }
 
+/**
+ * Pengaturan usaha milik HP utama (nama usaha, PPN, gambar QRIS).
+ * Perangkat staf menyimpan settings di localStorage-nya sendiri yang kosong,
+ * jadi tanpa endpoint ini mereka memakai nilai default: PPN 11%, nama
+ * "UMKM Pro", dan QRIS tidak pernah muncul di layar bayar.
+ */
+function apiGetSettings(socket: any): void {
+  const { ppn, namaUsaha, alamat, noTelp, qrisImage } = useSettingsStore.getState();
+  json(socket, { success: true, data: { ppn, namaUsaha, alamat, noTelp, qrisImage } });
+}
+
 async function apiGetOrders(socket: any): Promise<void> {
   try {
     const db = await getDB();
@@ -333,6 +345,7 @@ async function handleRequest(socket: any, req: HTTPRequest): Promise<void> {
   if (req.pathname === '/api/query' && req.method === 'POST') return apiQuery(socket, req.body);
   if (req.pathname === '/api/dashboard') return apiDashboard(socket);
   if (req.pathname === '/api/menus') return apiGetMenus(socket);
+  if (req.pathname === '/api/settings') return apiGetSettings(socket);
   if (req.pathname === '/api/ingredients') return apiGetIngredients(socket);
   if (req.pathname === '/api/orders') {
     if (req.method === 'POST') return apiCreateOrder(socket, req.body);

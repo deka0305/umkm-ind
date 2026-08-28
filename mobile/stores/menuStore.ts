@@ -203,7 +203,8 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     if (Platform.OS === 'web' && !isPhoneClient()) {
       const { data } = await supabase.from('menus').select('is_active').eq('id', id).single();
       if (data) {
-        const { error } = await supabase.from('menus').update({ is_active: !data.is_active }).eq('id', id);
+        // is_active bertipe integer di Postgres — kirim 1/0, bukan boolean
+        const { error } = await supabase.from('menus').update({ is_active: data.is_active ? 0 : 1 }).eq('id', id);
         if (error) throw new Error(error.message);
       }
     } else {

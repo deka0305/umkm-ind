@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { isPhoneClient } from '../lib/db';
 
 const STORAGE_KEY = 'umkm_settings';
 
@@ -8,6 +9,8 @@ export interface AppSettings {
   namaUsaha: string;
   alamat: string;
   noTelp: string;
+  /** Gambar QRIS statis merchant (data URI). Ditampilkan saat metode bayar QRIS. */
+  qrisImage: string;
 }
 
 interface SettingsState extends AppSettings {
@@ -21,6 +24,7 @@ const DEFAULTS: AppSettings = {
   namaUsaha: 'UMKM Pro',
   alamat: '',
   noTelp: '',
+  qrisImage: '',
 };
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -28,6 +32,21 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   loaded: false,
 
   load: async () => {
+    // Perangkat staf (web dari server HP): ambil settings HP utama, bukan
+    // localStorage sendiri yang kosong — kalau tidak, PPN & QRIS ikut default.
+    if (isPhoneClient()) {
+      try {
+        const res = await fetch('/api/settings');
+        const body = await res.json();
+        if (body?.success) {
+          set({ ...DEFAULTS, ...body.data, loaded: true });
+          return;
+        }
+      } catch {}
+      set({ loaded: true });
+      return;
+    }
+
     try {
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       if (raw) {
@@ -45,12 +64,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     const next = { ...get(), ...updates };
     set(next);
     try {
-      const toSave: AppSettings = {
-        ppn: next.ppn,
-        namaUsaha: next.namaUsaha,
-        alamat: next.alamat,
-        noTelp: next.noTelp,
-      };
+      // Ambil kunci dari DEFAULTS, bukan daftar manual — supaya field baru
+      // ikut tersimpan otomatis tanpa perlu ingat menambahkannya di sini.
+      const toSave = Object.fromEntries(
+        Object.keys(DEFAULTS).map((k) => [k, (next as any)[k]])
+      ) as AppSettings;
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
     } catch {}
   },

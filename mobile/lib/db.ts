@@ -149,6 +149,27 @@ class SupabaseDB {
       return Object.values(grouped).sort((a, b) => a.tgl.localeCompare(b.tgl)) as T[];
     }
 
+    // ── Breakdown per metode bayar (GROUP BY payment_method) ─────────────────
+    if (upper.includes('GROUP BY') && upper.includes('PAYMENT_METHOD') && upper.includes('FROM ORDERS')) {
+      const { data: orders } = await supabase.from('orders').select('*');
+      let rows = (orders ?? []).filter((r) => r.status === 'selesai');
+      if (params.length >= 2) {
+        const [start, end] = params as string[];
+        rows = rows.filter((r) => {
+          const d = (r.created_at ?? '').slice(0, 10);
+          return d >= start && d <= end;
+        });
+      }
+      const grouped: Record<string, { payment_method: string; count: number; total: number }> = {};
+      for (const r of rows) {
+        const method = r.payment_method || 'Tidak diketahui';
+        if (!grouped[method]) grouped[method] = { payment_method: method, count: 0, total: 0 };
+        grouped[method].count += 1;
+        grouped[method].total += r.total ?? 0;
+      }
+      return Object.values(grouped).sort((a, b) => b.total - a.total) as T[];
+    }
+
     // ── Top menus (JOIN order_items + menus + orders) ─────────────────────────
     if (upper.includes('GROUP BY') && upper.includes('JOIN MENUS') && upper.includes('JOIN ORDERS')) {
       const [{ data: orderItems }, { data: menus }, { data: orders }] = await Promise.all([
@@ -182,6 +203,19 @@ class SupabaseDB {
       return Object.values(grouped).sort((a, b) => b.qty - a.qty).slice(0, lim) as T[];
     }
 
+    // ── Daftar PO + jumlah item (GROUP BY po.id) ─────────────────────────────
+    if (upper.includes('GROUP BY') && upper.includes('FROM PURCHASE_ORDERS')) {
+      const [{ data: pos }, { data: items }] = await Promise.all([
+        supabase.from('purchase_orders').select('*'),
+        supabase.from('po_items').select('po_id'),
+      ]);
+      const counts: Record<string, number> = {};
+      for (const it of items ?? []) counts[it.po_id] = (counts[it.po_id] ?? 0) + 1;
+      return (pos ?? [])
+        .map((p) => ({ ...p, item_count: counts[p.id] ?? 0 }))
+        .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? '')) as T[];
+    }
+
     // ── Bookings (fallback ke localStorage kalau Supabase 404) ───────────────
     if (upper.includes('FROM BOOKINGS')) {
       const { data, error } = await supabase.from('bookings').select('*');
@@ -195,6 +229,13 @@ class SupabaseDB {
       const limitM = sql.match(/LIMIT\s+(\d+)/i);
       if (limitM) rows = rows.slice(0, parseInt(limitM[1]));
       return rows.map((r: any) => ({ ...r, customer_name: r.customer_name ?? 'Tamu' })) as T[];
+    }
+
+    // Agregat yang belum punya penanganan khusus di atas: fallback di bawah
+    // hanya mengembalikan baris mentah — angkanya akan salah tanpa ada tanda.
+    // Lebih baik gagal berisik daripada laporan yang keliru.
+    if (upper.includes('GROUP BY') || /\b(COUNT|SUM|AVG)\s*\(/i.test(sql)) {
+      throw new Error(`SupabaseDB: agregat SQL ini belum didukung — ${sql}`);
     }
 
     const table = getTable(sql);
@@ -340,7 +381,23 @@ class SupabaseDB {
         const id = params[0];
         const { data } = await supabase.from(table).select('is_active').eq('id', id).single();
         if (data) {
-          await supabase.from(table).update({ is_active: !data.is_active }).eq('id', id);
+          // is_active bertipe integer di Postgres — kirim 1/0, bukan boolean
+          await supabase.from(table).update({ is_active: data.is_active ? 0 : 1 }).eq('id', id);
+        }
+        return {};
+      }
+
+      // Kurangi stok: SET stock = MAX(0, stock - ?) — read-modify-write.
+      // Tidak bisa lewat parser umum di bawah: koma di dalam MAX() memecah
+      // ekspresinya jadi kolom palsu dan seluruh update ditolak Supabase.
+      if (/stock\s*=\s*MAX\(\s*0\s*,\s*stock\s*-\s*\?\s*\)/i.test(sql)) {
+        const qty = Number(params[0]) || 0;
+        const id = params[params.length - 1];
+        const { data } = await supabase.from(table).select('stock').eq('id', id).single();
+        if (data) {
+          await supabase.from(table)
+            .update({ stock: Math.max(0, (Number(data.stock) || 0) - qty) })
+            .eq('id', id);
         }
         return {};
       }
@@ -349,6 +406,13 @@ class SupabaseDB {
       const setMatch = sql.match(/SET\s+(.+?)\s+WHERE/is);
       const whereMatch = sql.match(/WHERE\s+(\w+)\s*=\s*\?/i);
       if (!setMatch || !whereMatch) return {};
+
+      // Parser ini hanya paham `col = ?`. Ekspresi apa pun (fungsi, aritmatika)
+      // akan salah-parse jadi kolom palsu dan menulis data yang keliru — tolak
+      // dengan berisik daripada merusak data diam-diam.
+      if (/[()]/.test(setMatch[1])) {
+        throw new Error(`SupabaseDB: UPDATE dengan ekspresi belum didukung — ${sql}`);
+      }
 
       const setCols = setMatch[1].split(',').map((c) => c.trim().split(/\s*=\s*/)[0].trim());
       const whereCol = whereMatch[1];
