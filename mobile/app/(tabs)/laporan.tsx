@@ -9,6 +9,7 @@ import { getDB } from '../../lib/db';
 import { supabase } from '../../lib/supabase';
 import { formatRupiah } from '../../lib/hpp-calculator';
 import { exportToPDF, exportToExcel, ReportData } from '../../lib/exportReport';
+import { PeriodSummary, summarizePeriod } from '../../lib/reportData';
 import { useSettingsStore } from '../../stores/settingsStore';
 import {
   AUDIT_LABEL, AuditRow, IntegrityResult, checkIntegrity, describeAudit, hasOwnerPin,
@@ -49,6 +50,7 @@ function LaporanScreen() {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
   const [integrity, setIntegrity] = useState<IntegrityResult | null>(null);
+  const [summary, setSummary] = useState<PeriodSummary | null>(null); // data export (semua order periode)
 
   // ── Pembatalan order ──────────────────────────────────────────────────────
   const [cancelTarget, setCancelTarget] = useState<OrderRow | null>(null);
@@ -138,9 +140,15 @@ function LaporanScreen() {
         db.getAllAsync<AuditRow>('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 5000').catch(() => []),
         db.getAllAsync<any>('SELECT * FROM menus'),
       ]);
-      setIntegrity(checkIntegrity({
+      const check = checkIntegrity({
         orders: allOrders, items: allItems, audits, menus,
         start: startDate, end: endDate, today: endDate,
+      });
+      setIntegrity(check);
+      setSummary(summarizePeriod({
+        orders: allOrders, items: allItems, menus, start: startDate, end: endDate,
+        creatorOf: check.creatorOf, changed: check.changedOrderIds,
+        flagged: new Set([...check.mismatched, ...check.cancelledNoLog]),
       }));
     } finally {
       setLoading(false);
@@ -148,19 +156,14 @@ function LaporanScreen() {
   }
 
   function buildReportData(): ReportData {
+    if (!summary) throw new Error('Data laporan belum siap, coba lagi');
     return {
       period,
       startDate: dateRange.start,
       endDate: dateRange.end,
-      totalRevenue,
-      totalOrder,
-      totalTax,
-      totalHpp,
       namaUsaha: namaUsaha || 'UMKM Pro',
+      summary,
       integrity: integrity ?? undefined,
-      points,
-      topMenus,
-      orders,
     };
   }
 
@@ -251,8 +254,8 @@ function LaporanScreen() {
                 <Ionicons name="grid" size={20} color="#2E7D32" />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={s.exportOptionTitle}>Export Excel (CSV)</Text>
-                <Text style={s.exportOptionDesc}>Data tabel yang bisa dibuka di Excel</Text>
+                <Text style={s.exportOptionTitle}>Export Excel (.xlsx)</Text>
+                <Text style={s.exportOptionDesc}>Ringkasan, harian, menu, order, petugas & riwayat — per sheet</Text>
               </View>
               <Ionicons name="chevron-forward" size={16} color={Colors.textMuted} />
             </TouchableOpacity>

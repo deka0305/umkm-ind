@@ -234,6 +234,7 @@ export interface IntegrityResult {
   pinFails: number;              // PIN owner + login petugas yang salah
   changedOrderIds: Set<string>;
   byActor: Array<{ actor: string; orders: number; total: number; cancelled: number }>;
+  creatorOf: Record<string, string>; // order id → petugas yang membuat
 }
 
 const inRange = (iso: string, start: string, end: string) => {
@@ -303,5 +304,6 @@ export function checkIntegrity({ orders, items, audits, menus, start, end, today
       .filter((a) => a.action === 'order_batal' || a.action === 'order_tambah_item')
       .map((a) => a.entity_id)),
     byActor: Object.values(actors).sort((a, b) => b.total - a.total),
+    creatorOf: creator,
   };
 }
