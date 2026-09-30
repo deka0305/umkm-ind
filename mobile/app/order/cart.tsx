@@ -8,8 +8,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { Platform } from 'react-native';
 import { useCartStore } from '../../stores/cartStore';
 import { useSettingsStore } from '../../stores/settingsStore';
-import { getDB, generateId } from '../../lib/db';
+import { getDB, generateId, isLocalDB } from '../../lib/db';
+
+// HPP disalin saat terjual → laporan lama tetap benar walau HPP menu diubah.
+// Hanya SQLite: kolom hpp belum ada di Supabase, dan parser SupabaseDB tidak paham subquery
+// (param menu_id terakhir diabaikan di sana).
+const INSERT_ITEM_SQL = isLocalDB()
+  ? 'INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal, hpp) VALUES (?, ?, ?, ?, ?, ?, (SELECT hpp FROM menus WHERE id = ?))'
+  : 'INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal) VALUES (?, ?, ?, ?, ?, ?)';
 import { notifyDataChange } from '../../lib/sync';
+import { logAudit } from '../../lib/audit';
 import { supabase } from '../../lib/supabase';
 import { checkInternetConnection } from '../../lib/networkUtils';
 import { formatRupiah } from '../../lib/hpp-calculator';
@@ -145,9 +153,8 @@ export default function CartScreen() {
       }));
       for (const item of snapItemsWithId) {
         await db.runAsync(
-          `INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          item.itemId, newOrderId, item.menuId, item.qty, item.price, item.price * item.qty
+          INSERT_ITEM_SQL,
+          item.itemId, newOrderId, item.menuId, item.qty, item.price, item.price * item.qty, item.menuId
         );
         // Kurangi stok menu; synced=0 agar push sync kirim ke Supabase
         await db.runAsync(
@@ -170,6 +177,7 @@ export default function CartScreen() {
       clearCart();
       notifyDataChange();
       setShowSuccess(true);
+      logAudit('order_baru', 'order', newOrderId, { total: snapTotal, status, payment: snapPayment });
 
       // ── 3. Tulis ke Supabase di background (jika ada internet) ───────────────
       // Web sudah tulis langsung via SupabaseDB — hanya native yang perlu ini
@@ -214,7 +222,7 @@ export default function CartScreen() {
       );
 
       const existing = await db.getFirstAsync(
-        'SELECT subtotal, tax, discount FROM orders WHERE id = ?', editOrderId
+        'SELECT subtotal, tax, discount, total FROM orders WHERE id = ?', editOrderId
       ) as any;
       if (!existing) throw new Error('Order tidak ditemukan');
 
@@ -228,21 +236,26 @@ export default function CartScreen() {
 
       const addedSubtotal = snapItems.reduce((s, i) => s + i.price * i.qty, 0);
       const newSubtotal = (existing.subtotal ?? 0) + addedSubtotal;
-      const newTax = newSubtotal * (ppn / 100);
+      // PPN yang sudah ditagih tetap; tarif sekarang hanya untuk item tambahan
+      const newTax = (existing.tax ?? 0) + addedSubtotal * (ppn / 100);
       const newTotal = newSubtotal + newTax - (existing.discount ?? 0);
 
       const online = Platform.OS !== 'web' && await checkInternetConnection();
 
       for (const item of snapItems) {
         await db.runAsync(
-          'INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal) VALUES (?, ?, ?, ?, ?, ?)',
-          item.itemId, editOrderId, item.menuId, item.qty, item.price, item.price * item.qty
+          INSERT_ITEM_SQL,
+          item.itemId, editOrderId, item.menuId, item.qty, item.price, item.price * item.qty, item.menuId
         );
       }
       await db.runAsync(
         'UPDATE orders SET subtotal = ?, tax = ?, total = ?, synced = ? WHERE id = ?',
         newSubtotal, newTax, newTotal, online ? 1 : 0, editOrderId
       );
+      logAudit('order_tambah_item', 'order', editOrderId, {
+        oldTotal: existing.total, newTotal,
+        items: snapItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price })),
+      });
 
       const shortId = editOrderId.slice(-6).toUpperCase();
       setOrderId(shortId);

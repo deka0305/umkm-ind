@@ -6,7 +6,10 @@ import {
 import { pickImageFromGallery } from '../../lib/imagePicker';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { getDB, resetAllData } from '../../lib/db';
+import { getDB, resetAllData, isPhoneClient } from '../../lib/db';
+import { logAudit, diffFields, hasOwnerPin, verifyOwnerPin } from '../../lib/audit';
+import { useSessionStore, useIsOwner } from '../../stores/sessionStore';
+import CancelOrderModal, { CancelTarget } from '../../components/CancelOrderModal';
 import { onPullComplete, manualSync } from '../../lib/sync';
 import { supabase } from '../../lib/supabase';
 import { useCartStore } from '../../stores/cartStore';
@@ -172,6 +175,8 @@ const sw = StyleSheet.create({
 
 export default function DashboardScreen() {
   const router = useRouter();
+  const isOwner = useIsOwner();
+  const [cancelTarget, setCancelTarget] = useState<CancelTarget | null>(null);
   const { clearCart, setEditOrder } = useCartStore();
   const { ppn, namaUsaha, alamat, noTelp, qrisImage, save: saveSettings } = useSettingsStore();
   const [data, setData] = useState<DashboardData>({
@@ -183,6 +188,8 @@ export default function DashboardScreen() {
   const [formPpn, setFormPpn] = useState(String(ppn));
   const [formNama, setFormNama] = useState(namaUsaha);
   const [formQris, setFormQris] = useState(qrisImage);
+  const [formPin, setFormPin] = useState('');       // PIN saat ini (otorisasi)
+  const [formNewPin, setFormNewPin] = useState(''); // PIN baru (opsional)
 
   // ── Detail stok ───────────────────────────────────────────────────────────
   const [stokModal, setStokModal] = useState(false);
@@ -284,6 +291,8 @@ export default function DashboardScreen() {
     setFormPpn(String(ppn));
     setFormNama(namaUsaha);
     setFormQris(qrisImage);
+    setFormPin('');
+    setFormNewPin('');
     setShowSettings(true);
   }
 
@@ -292,13 +301,46 @@ export default function DashboardScreen() {
     if (picked) setFormQris(picked.uri);
   }
 
-  function handleSaveSettings() {
+  function showMsg(title: string, msg?: string) {
+    if (Platform.OS === 'web') (window as any).alert(msg ? `${title}
+${msg}` : title);
+    else Alert.alert(title, msg);
+  }
+
+  /** Pengaturan & reset hanya untuk owner bila PIN sudah diatur. */
+  async function authorizeOwner(): Promise<boolean> {
+    if (!hasOwnerPin()) return true;
+    const r = await verifyOwnerPin(formPin);
+    if (!r.ok) showMsg('Tidak diizinkan', r.error);
+    return r.ok;
+  }
+
+  async function handleSaveSettings() {
     const parsed = parseFloat(formPpn.replace(',', '.'));
     if (isNaN(parsed) || parsed < 0 || parsed > 100) {
-      Alert.alert('PPN tidak valid', 'Masukkan angka antara 0 – 100');
+      showMsg('PPN tidak valid', 'Masukkan angka antara 0 – 100');
       return;
     }
-    saveSettings({ ppn: parsed, namaUsaha: formNama.trim() || 'UMKM Pro', qrisImage: formQris });
+    if (formNewPin && !/^\d{4,6}$/.test(formNewPin)) {
+      showMsg('PIN tidak valid', 'PIN owner harus 4–6 angka');
+      return;
+    }
+    if (!(await authorizeOwner())) return;
+
+    const nextNama = formNama.trim() || 'UMKM Pro';
+    const changes: Record<string, [any, any]> = diffFields(
+      { ppn, namaUsaha }, { ppn: parsed, namaUsaha: nextNama }, ['ppn', 'namaUsaha'],
+    );
+    if (formQris !== qrisImage) changes.qris = [qrisImage ? 'ada' : 'kosong', formQris ? 'diganti' : 'dihapus'];
+    if (formNewPin) changes.pinOwner = [hasOwnerPin() ? 'lama' : 'belum ada', 'baru']; // PIN tidak pernah dicatat
+
+    await saveSettings({
+      ppn: parsed, namaUsaha: nextNama, qrisImage: formQris,
+      ...(formNewPin ? { ownerPin: formNewPin } : {}),
+    });
+    if (Object.keys(changes).length) logAudit('pengaturan_ubah', 'pengaturan', '', { changes });
+    // PIN baru → layar login aktif; yang sedang mengatur langsung masuk sebagai Owner
+    if (formNewPin && !useSessionStore.getState().petugas) await useSessionStore.getState().login('owner', formNewPin);
     setShowSettings(false);
   }
 
@@ -308,10 +350,16 @@ export default function DashboardScreen() {
     router.push('/(tabs)/katalog');
   }
 
-  function handleResetData() {
+  async function handleResetData() {
+    // Data perangkat staf ada di HP utama; reset dari sini hanya akan menghapus data cloud.
+    if (isPhoneClient()) {
+      showMsg('Reset hanya dari HP utama', 'Data tersimpan di HP utama — lakukan reset langsung di HP tersebut.');
+      return;
+    }
+    if (!(await authorizeOwner())) return;
     Alert.alert(
       'Reset Semua Data',
-      'Semua data (order, menu, stok, customer) akan dihapus permanen dari perangkat dan Supabase.\n\nData tidak bisa dipulihkan!',
+      'Semua data (order, menu, stok, customer, akun petugas, PIN owner) akan dihapus permanen dari perangkat dan Supabase.\n\nRiwayat Perubahan tetap disimpan sebagai bukti.\n\nData tidak bisa dipulihkan!',
       [
         { text: 'Batal', style: 'cancel' },
         {
@@ -330,6 +378,11 @@ export default function DashboardScreen() {
                     try {
                       setShowSettings(false);
                       await resetAllData();
+                      // audit_log sengaja tidak ikut terhapus
+                      await logAudit('reset_data', 'pengaturan', '', {});
+                      // Kembali ke kondisi awal: PIN owner & sesi login ikut dihapus
+                      await saveSettings({ ownerPin: '' });
+                      await useSessionStore.getState().logout();
                       await loadData();
                       Alert.alert('Berhasil', 'Semua data telah direset ke kondisi awal.');
                     } catch {
@@ -449,9 +502,11 @@ export default function DashboardScreen() {
           <TouchableOpacity style={s.refreshBtn} onPress={loadData}>
             <Ionicons name="refresh-outline" size={20} color={Colors.textSecondary} />
           </TouchableOpacity>
-          <TouchableOpacity style={s.refreshBtn} onPress={openSettings}>
-            <Ionicons name="settings-outline" size={20} color={Colors.textSecondary} />
-          </TouchableOpacity>
+          {isOwner && (
+            <TouchableOpacity style={s.refreshBtn} onPress={openSettings}>
+              <Ionicons name="settings-outline" size={20} color={Colors.textSecondary} />
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Stats cards */}
@@ -460,10 +515,12 @@ export default function DashboardScreen() {
             <Text style={s.statNumWhite}>{data.totalOrder}</Text>
             <Text style={s.statDescWhite}>Order Selesai</Text>
           </View>
-          <View style={[s.statCard, { backgroundColor: Colors.white }]}>
-            <Text style={[s.statNum, { color: Colors.textPrimary }]}>{formatRupiah(data.pendapatan)}</Text>
-            <Text style={s.statDesc}>Pendapatan Hari Ini</Text>
-          </View>
+          {isOwner && (
+            <View style={[s.statCard, { backgroundColor: Colors.white }]}>
+              <Text style={[s.statNum, { color: Colors.textPrimary }]}>{formatRupiah(data.pendapatan)}</Text>
+              <Text style={s.statDesc}>Pendapatan Hari Ini</Text>
+            </View>
+          )}
         </View>
       </View>
 
@@ -474,7 +531,7 @@ export default function DashboardScreen() {
       <View style={s.section}>
         <Text style={s.sectionTitle}>Aksi Cepat</Text>
         <View style={s.actionsRow}>
-          {QUICK_ACTIONS.map((a) => (
+          {QUICK_ACTIONS.filter((a) => isOwner || a.route !== '/po').map((a) => (
             <TouchableOpacity
               key={a.route}
               style={[s.actionBtn, { backgroundColor: a.bg }]}
@@ -511,7 +568,7 @@ export default function DashboardScreen() {
           value={String(data.orderPending)}
           sub={data.orderPending > 0 ? 'Proses segera' : 'Tidak ada'}
           bg={data.orderPending > 0 ? Colors.amberLight : Colors.background}
-          onPress={() => router.push('/(tabs)/laporan')}
+          onPress={() => isOwner && router.push('/(tabs)/laporan')}
         />
       </View>
 
@@ -568,9 +625,11 @@ export default function DashboardScreen() {
             <View style={[s.dot, { backgroundColor: Colors.primary }]} />
             <Text style={s.cardTitle}>Order Terbaru</Text>
           </View>
-          <TouchableOpacity onPress={() => router.push('/(tabs)/laporan')}>
-            <Text style={s.seeAll}>Laporan →</Text>
-          </TouchableOpacity>
+          {isOwner && (
+            <TouchableOpacity onPress={() => router.push('/(tabs)/laporan')}>
+              <Text style={s.seeAll}>Laporan →</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {data.orderTerbaru.length === 0 ? (
@@ -629,6 +688,14 @@ export default function DashboardScreen() {
                       >
                         <Ionicons name="add" size={11} color={Colors.info} />
                         <Text style={s.tambahMenuBtnText}>+Menu</Text>
+                      </TouchableOpacity>
+                    )}
+                    {order.status !== 'batal' && (
+                      <TouchableOpacity
+                        style={s.batalBtn}
+                        onPress={(e) => { e.stopPropagation?.(); setCancelTarget(order); }}
+                      >
+                        <Ionicons name="close" size={11} color={Colors.danger} />
                       </TouchableOpacity>
                     )}
                   </View>
@@ -772,6 +839,12 @@ export default function DashboardScreen() {
     )}
 
     {/* ── Struk / Detail Order ────────────────────────── */}
+    <CancelOrderModal
+      order={cancelTarget}
+      onClose={() => setCancelTarget(null)}
+      onDone={() => { setCancelTarget(null); loadData(); }}
+    />
+
     <ReceiptModal
       visible={receiptVisible}
       data={receiptData}
@@ -783,6 +856,7 @@ export default function DashboardScreen() {
       <View style={s.settingsOverlay}>
         <View style={s.settingsSheet}>
           <View style={s.settingsHandle} />
+          <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
           <View style={s.settingsHeader}>
             <View style={s.settingsIconWrap}>
               <Ionicons name="settings" size={18} color={Colors.primary} />
@@ -878,6 +952,54 @@ export default function DashboardScreen() {
             </TouchableOpacity>
           )}
 
+          {/* PIN Owner — mengunci batal order selesai, pengaturan, dan reset data */}
+          <Text style={s.settingsLabel}>PIN Owner</Text>
+          {hasOwnerPin() && (
+            <View style={s.settingsInputRow}>
+              <Ionicons name="lock-closed-outline" size={16} color={Colors.textMuted} />
+              <TextInput
+                style={s.settingsInput}
+                value={formPin}
+                onChangeText={setFormPin}
+                keyboardType="number-pad"
+                secureTextEntry
+                maxLength={6}
+                placeholder="PIN owner (wajib untuk simpan / reset)"
+                placeholderTextColor={Colors.textMuted}
+              />
+            </View>
+          )}
+          {!isPhoneClient() ? (
+            <View style={[s.settingsInputRow, { marginTop: 6 }]}>
+              <Ionicons name="key-outline" size={16} color={Colors.textMuted} />
+              <TextInput
+                style={s.settingsInput}
+                value={formNewPin}
+                onChangeText={setFormNewPin}
+                keyboardType="number-pad"
+                secureTextEntry
+                maxLength={6}
+                placeholder={hasOwnerPin() ? 'PIN baru (kosongkan jika tidak diganti)' : 'Buat PIN owner 4–6 angka'}
+                placeholderTextColor={Colors.textMuted}
+              />
+            </View>
+          ) : (
+            <Text style={s.ppnPreviewLabel}>PIN owner hanya bisa diatur di HP utama.</Text>
+          )}
+          {!hasOwnerPin() && (
+            <Text style={[s.ppnPreviewLabel, { color: Colors.danger }]}>
+              ⚠ PIN belum diatur — karyawan bisa membatalkan order yang sudah dibayar dan mengubah pengaturan.
+            </Text>
+          )}
+
+          <TouchableOpacity
+            style={[s.qrisActionBtn, { marginTop: 10, alignSelf: 'flex-start' }]}
+            onPress={() => { setShowSettings(false); router.push('/petugas'); }}
+          >
+            <Ionicons name="people-outline" size={16} color={Colors.primary} />
+            <Text style={s.qrisActionText}>Kelola Petugas (akun & PIN kasir)</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity style={s.settingsSaveBtn} onPress={handleSaveSettings}>
             <Ionicons name="checkmark-circle" size={18} color={Colors.white} />
             <Text style={s.settingsSaveBtnText}>Simpan Pengaturan</Text>
@@ -888,6 +1010,7 @@ export default function DashboardScreen() {
             <Ionicons name="trash-outline" size={18} color={Colors.danger} />
             <Text style={s.resetBtnText}>Reset Semua Data</Text>
           </TouchableOpacity>
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -897,7 +1020,7 @@ export default function DashboardScreen() {
 
 function MetricCard({
   icon, iconColor, label, value, sub, bg, onPress,
-}: { icon: any; iconColor: string; label: string; value: string; sub: string; bg: string; onPress: () => void }) {
+}: { icon: any; iconColor: string; label: string; value: string; sub: string; bg: string; onPress: () => any }) {
   return (
     <TouchableOpacity style={[s.metricCard, { borderLeftColor: iconColor, borderLeftWidth: 3 }]} onPress={onPress}>
       <View style={[s.metricIcon, { backgroundColor: bg }]}>
@@ -1023,6 +1146,10 @@ const s = StyleSheet.create({
     backgroundColor: Colors.infoLight, borderRadius: Radius.full,
     paddingHorizontal: 7, paddingVertical: 3,
   },
+  batalBtn: {
+    backgroundColor: Colors.dangerLight, borderRadius: Radius.full,
+    paddingHorizontal: 6, paddingVertical: 3,
+  },
   tambahMenuBtnText: { fontSize: 10, fontWeight: '700', color: Colors.info },
 
   /* Empty state */
@@ -1056,7 +1183,7 @@ const s = StyleSheet.create({
   settingsSheet: {
     backgroundColor: Colors.white,
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    padding: Spacing.md, paddingBottom: 36,
+    padding: Spacing.md, paddingBottom: 36, maxHeight: '92%',
   },
   settingsHandle: {
     width: 40, height: 4, borderRadius: 2,

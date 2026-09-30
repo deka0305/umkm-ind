@@ -15,8 +15,10 @@
 import { Platform } from 'react-native';
 import { getDB, generateId } from './db';
 import { notifyDataChange } from './sync';
+import { cancelOrder, checkPinLocal, checkStaffLoginLocal } from './audit';
 import { WEBDIST } from './webdist.generated';
 import { useSettingsStore } from '../stores/settingsStore';
+import { addStaffLocal, listAllStaffLocal, resetStaffPinLocal, setStaffActiveLocal } from '../stores/sessionStore';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -201,8 +203,65 @@ async function apiGetMenus(socket: any): Promise<void> {
  * "UMKM Pro", dan QRIS tidak pernah muncul di layar bayar.
  */
 function apiGetSettings(socket: any): void {
-  const { ppn, namaUsaha, alamat, noTelp, qrisImage } = useSettingsStore.getState();
-  json(socket, { success: true, data: { ppn, namaUsaha, alamat, noTelp, qrisImage } });
+  const { ppn, namaUsaha, alamat, noTelp, qrisImage, ownerPin } = useSettingsStore.getState();
+  // ownerPin sengaja TIDAK dikirim — hanya status apakah sudah diatur.
+  json(socket, { success: true, data: { ppn, namaUsaha, alamat, noTelp, qrisImage, pinSet: !!ownerPin } });
+}
+
+/** Daftar nama petugas aktif untuk layar login perangkat staf — tanpa PIN. */
+async function apiListStaff(socket: any): Promise<void> {
+  try {
+    const db = await getDB();
+    const data = await db.getAllAsync('SELECT id, name FROM staff WHERE active = 1 ORDER BY name');
+    json(socket, { success: true, data });
+  } catch (err: any) {
+    json(socket, { success: false, error: err.message }, 500);
+  }
+}
+
+async function apiStaffLogin(socket: any, body: string, ip: string): Promise<void> {
+  try {
+    const { staffId, pin } = JSON.parse(body || '{}');
+    json(socket, await checkStaffLoginLocal(String(staffId ?? ''), String(pin ?? ''), undefined, ip));
+  } catch (err: any) {
+    json(socket, { ok: false, error: err.message }, 400);
+  }
+}
+
+/** Kelola petugas dari perangkat staf — PIN owner diverifikasi ulang di setiap panggilan. */
+async function apiStaffAdmin(socket: any, body: string, ip: string): Promise<void> {
+  try {
+    const { ownerPin, op, id, name, pin, active } = JSON.parse(body || '{}');
+    if (!useSettingsStore.getState().ownerPin) {
+      return json(socket, { success: false, error: 'Atur PIN owner di HP utama dulu' }, 403);
+    }
+    const actor = `Owner (${ip})`;
+    const auth = await checkPinLocal(String(ownerPin ?? ''), actor, ip);
+    if (!auth.ok) return json(socket, { success: false, error: auth.error }, 403);
+
+    const staff = id ? (await listAllStaffLocal()).find((s) => s.id === id) : undefined;
+    if (op !== 'list' && op !== 'add' && !staff) {
+      return json(socket, { success: false, error: 'Petugas tidak ditemukan' }, 404);
+    }
+    if (op === 'add') await addStaffLocal(name, String(pin ?? ''), actor);
+    else if (op === 'active') await setStaffActiveLocal(staff!, !!active, actor);
+    else if (op === 'pin') await resetStaffPinLocal(staff!, String(pin ?? ''), actor);
+    else if (op !== 'list') return json(socket, { success: false, error: 'op tidak dikenal' }, 400);
+
+    json(socket, { success: true, data: await listAllStaffLocal() });
+  } catch (err: any) {
+    json(socket, { success: false, error: err.message }, 400);
+  }
+}
+
+async function apiVerifyPin(socket: any, body: string, ip: string): Promise<void> {
+  try {
+    const { pin, actor } = JSON.parse(body || '{}');
+    const r = await checkPinLocal(String(pin ?? ''), actor ? `${actor} (${ip})` : `Perangkat Staf (${ip})`, ip);
+    json(socket, r);
+  } catch (err: any) {
+    json(socket, { ok: false, error: err.message }, 400);
+  }
 }
 
 async function apiGetOrders(socket: any): Promise<void> {
@@ -246,13 +305,14 @@ async function apiCreateOrder(socket: any, body: string): Promise<void> {
 
     for (const item of items) {
       await db.runAsync(
-        'INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal) VALUES (?, ?, ?, ?, ?, ?)',
+        'INSERT INTO order_items (id, order_id, menu_id, qty, price, subtotal, hpp) VALUES (?, ?, ?, ?, ?, ?, (SELECT hpp FROM menus WHERE id = ?))',
         generateId(),
         orderId,
         item.menu_id,
         item.qty,
         item.price,
-        item.price * item.qty
+        item.price * item.qty,
+        item.menu_id
       );
     }
 
@@ -263,9 +323,14 @@ async function apiCreateOrder(socket: any, body: string): Promise<void> {
   }
 }
 
-async function apiPatchOrderStatus(socket: any, orderId: string, body: string): Promise<void> {
+async function apiPatchOrderStatus(socket: any, orderId: string, body: string, ip: string): Promise<void> {
   try {
     const { status } = JSON.parse(body);
+    // Pembatalan wajib lewat cancelOrder (alasan, PIN untuk order selesai, stok kembali, audit).
+    if (status === 'batal') {
+      await cancelOrder(orderId, { reason: 'Dibatalkan dari web mini', actor: `Web mini (${ip})` });
+      return json(socket, { success: true });
+    }
     const db = await getDB();
     await db.runAsync('UPDATE orders SET status = ? WHERE id = ?', status, orderId);
     notifyDataChange();
@@ -292,6 +357,13 @@ async function apiQuery(socket: any, body: string): Promise<void> {
     const { op, sql, params } = JSON.parse(body);
     if (typeof sql !== 'string' || !sql.trim()) {
       return json(socket, { success: false, error: 'sql wajib diisi' }, 400);
+    }
+    // Web app tidak pernah butuh exec/DELETE/DDL. Menolaknya menutup jalan menghapus
+    // order atau mematikan trigger audit_log dari perangkat staf.
+    if (op === 'exec' || /\b(DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|PRAGMA|VACUUM)\b/i.test(sql)
+        || /^\s*(UPDATE|REPLACE|INSERT\s+OR\s+REPLACE)\b[^;]*\baudit_log\b/i.test(sql)
+        || /\bstaff\b/i.test(sql)) { // PIN petugas hanya boleh lewat /api/staff-login
+      return json(socket, { success: false, error: 'Perintah ini tidak diizinkan dari perangkat staf' }, 403);
     }
     const db = await getDB();
     const args: any[] = Array.isArray(params) ? params : [];
@@ -342,7 +414,12 @@ async function handleRequest(socket: any, req: HTTPRequest): Promise<void> {
   }
 
   // API routes
+  const ip = socket.remoteAddress || socket.address?.()?.address || '?';
   if (req.pathname === '/api/query' && req.method === 'POST') return apiQuery(socket, req.body);
+  if (req.pathname === '/api/verify-pin' && req.method === 'POST') return apiVerifyPin(socket, req.body, ip);
+  if (req.pathname === '/api/staff') return apiListStaff(socket);
+  if (req.pathname === '/api/staff-admin' && req.method === 'POST') return apiStaffAdmin(socket, req.body, ip);
+  if (req.pathname === '/api/staff-login' && req.method === 'POST') return apiStaffLogin(socket, req.body, ip);
   if (req.pathname === '/api/dashboard') return apiDashboard(socket);
   if (req.pathname === '/api/menus') return apiGetMenus(socket);
   if (req.pathname === '/api/settings') return apiGetSettings(socket);
@@ -354,7 +431,7 @@ async function handleRequest(socket: any, req: HTTPRequest): Promise<void> {
   // PATCH /api/orders/:id/status
   const patchMatch = req.pathname.match(/^\/api\/orders\/([^/]+)\/status$/);
   if (patchMatch && req.method === 'PATCH') {
-    return apiPatchOrderStatus(socket, patchMatch[1], req.body);
+    return apiPatchOrderStatus(socket, patchMatch[1], req.body, ip);
   }
 
   // Web app lengkap (hasil expo export, jika sudah di-build via npm run build:webdist)

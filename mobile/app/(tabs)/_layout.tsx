@@ -1,4 +1,5 @@
-import { Platform, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { Platform, View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { useSessionStore, useIsOwner } from '../../stores/sessionStore';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Colors, FontSize, Spacing, Radius } from '../../constants/theme';
@@ -7,14 +8,43 @@ const TABS = [
   { name: 'index',   title: 'Dashboard', icon: 'grid'       },
   { name: 'katalog', title: 'Katalog',   icon: 'restaurant' },
   { name: 'stok',    title: 'Stok',      icon: 'layers'     },
-  { name: 'hpp',     title: 'HPP',       icon: 'calculator' },
-  { name: 'laporan', title: 'Laporan',   icon: 'bar-chart'  },
+  { name: 'hpp',     title: 'HPP',       icon: 'calculator', ownerOnly: true },
+  { name: 'laporan', title: 'Laporan',   icon: 'bar-chart',  ownerOnly: true },
 ] as const;
 
 const isWeb = Platform.OS === 'web';
+
+/** Petugas yang sedang login + tombol ganti petugas. */
+function PetugasBadge() {
+  const { petugas, logout } = useSessionStore();
+  if (!petugas) return null;
+  return (
+    <TouchableOpacity
+      style={s.petugas}
+      onPress={() => Alert.alert('Ganti petugas?', `Saat ini: ${petugas.name}`, [
+        { text: 'Batal', style: 'cancel' },
+        { text: 'Keluar', onPress: () => { logout(); } },
+      ])}
+    >
+      <Ionicons name={petugas.role === 'owner' ? 'shield-checkmark' : 'person-circle'} size={16} color={Colors.primary} />
+      <Text style={s.petugasText} numberOfLines={1}>{petugas.name}</Text>
+      <Ionicons name="swap-horizontal" size={13} color={Colors.textMuted} />
+    </TouchableOpacity>
+  );
+}
 const SIDEBAR_W = 224;
 
+/** Tab yang boleh dilihat petugas yang sedang login. */
+function useVisibleTab() {
+  const isOwner = useIsOwner();
+  return (routeName: string) => {
+    const tab = TABS.find((t) => t.name === routeName);
+    return tab && (isOwner || !('ownerOnly' in tab)) ? tab : null;
+  };
+}
+
 function WebSidebar({ state, navigation }: any) {
+  const visibleTab = useVisibleTab();
   return (
     <View style={s.sidebar}>
       {/* Brand */}
@@ -31,7 +61,7 @@ function WebSidebar({ state, navigation }: any) {
 
       {/* Nav items */}
       {state.routes.map((route: any, i: number) => {
-        const tab = TABS.find((t) => t.name === route.name);
+        const tab = visibleTab(route.name);
         if (!tab) return null;
         const focused = state.index === i;
         return (
@@ -54,6 +84,7 @@ function WebSidebar({ state, navigation }: any) {
 
       {/* Footer */}
       <View style={{ flex: 1 }} />
+      <PetugasBadge />
       <View style={s.sidebarFooter}>
         <Ionicons name="leaf-outline" size={14} color={Colors.textMuted} />
         <Text style={s.footerText}>v1.0.0</Text>
@@ -63,10 +94,11 @@ function WebSidebar({ state, navigation }: any) {
 }
 
 function MobileTabBar({ state, navigation }: any) {
+  const visibleTab = useVisibleTab();
   return (
     <View style={s.tabBar}>
       {state.routes.map((route: any, i: number) => {
-        const tab = TABS.find((t) => t.name === route.name);
+        const tab = visibleTab(route.name);
         if (!tab) return null;
         const focused = state.index === i;
         return (
@@ -102,6 +134,7 @@ export default function TabsLayout() {
         headerStyle: { backgroundColor: Colors.white },
         headerTitleStyle: { fontWeight: '700', color: Colors.textPrimary, fontSize: FontSize.base },
         headerShadowVisible: false,
+        headerRight: () => <PetugasBadge />,
       }}
     >
       <Tabs.Screen name="index"   options={{ title: 'Dashboard' }} />
@@ -114,6 +147,12 @@ export default function TabsLayout() {
 }
 
 const s = StyleSheet.create({
+  petugas: {
+    flexDirection: 'row', alignItems: 'center', gap: 5, maxWidth: 170,
+    paddingHorizontal: 10, paddingVertical: 6, marginHorizontal: 12,
+    borderRadius: Radius.sm, backgroundColor: Colors.primaryLight,
+  },
+  petugasText: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary, flexShrink: 1 },
   /* ── Web Sidebar ─────────────────────────── */
   sidebar: {
     position: 'fixed' as any,

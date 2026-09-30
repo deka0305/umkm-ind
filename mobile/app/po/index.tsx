@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import OwnerOnly from '../../components/OwnerOnly';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
   Modal, TextInput, Alert, ActivityIndicator, ScrollView,
@@ -23,7 +24,11 @@ const STATUS_COLOR: Record<string, string> = {
   selesai: Colors.primary,
 };
 
-export default function POScreen() {
+export default function POScreenGuarded() {
+  return <OwnerOnly><POScreen /></OwnerOnly>;
+}
+
+function POScreen() {
   const [pos, setPOs] = useState<PO[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);

@@ -222,6 +222,17 @@ export async function pullFromSupabase(): Promise<void> {
     );
   }
 
+  // Audit log dari web/device lain — INSERT OR IGNORE: baris lama tidak pernah berubah
+  const { data: audits } = await supabase.from('audit_log').select('*').order('created_at', { ascending: false }).limit(500);
+  for (const a of audits ?? []) {
+    await db.runAsync(
+      `INSERT OR IGNORE INTO audit_log (id, action, entity, entity_id, detail, actor, synced, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+      a.id, a.action, a.entity ?? null, a.entity_id ?? null, a.detail ?? null, a.actor ?? null,
+      a.created_at ?? new Date().toISOString()
+    );
+  }
+
   // Beri tahu semua listener bahwa data baru sudah masuk ke SQLite
   _pullListeners.forEach((cb) => cb());
 }
@@ -266,6 +277,17 @@ export async function syncPendingPurchaseOrders(): Promise<void> {
   }
 }
 
+export async function syncPendingAuditLog(): Promise<void> {
+  if (Platform.OS === 'web') return;
+  const db = await getDB();
+  const pending = (await db.getAllAsync('SELECT * FROM audit_log WHERE synced = 0')) as any[];
+  if (pending.length === 0) return;
+  const { error } = await supabase.from('audit_log').upsert(pending.map((a) => ({ ...a, synced: 1 })));
+  if (error) { console.warn('[sync] audit_log:', error.message); return; }
+  const ids = pending.map((a) => a.id);
+  await db.runAsync(`UPDATE audit_log SET synced = 1 WHERE id IN (${ids.map(() => '?').join(', ')})`, ...ids);
+}
+
 // ─── syncAll ──────────────────────────────────────────────────────────────────
 
 let _retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -300,6 +322,7 @@ export async function syncAll(): Promise<boolean> {
     await syncPendingBookings();
     await syncPendingStockMovements();
     await syncPendingPurchaseOrders();
+    await syncPendingAuditLog();
 
     _lastSync = new Date();
     setStatus('idle');
@@ -354,6 +377,7 @@ export async function pushPendingAll(): Promise<void> {
   await syncPendingStockMovements();
   await syncPendingBookings();
   await syncPendingPurchaseOrders();
+  await syncPendingAuditLog();
   // Tidak perlu notify _pullListeners — push hanya mengirim data yang sudah ada
   // di SQLite lokal. UI sudah diupdate sebelum push terjadi.
 }

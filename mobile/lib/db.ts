@@ -19,6 +19,11 @@ export function isPhoneClient(): boolean {
   return Platform.OS === 'web' && typeof window !== 'undefined' && window.location.port === '3333';
 }
 
+/** Data tersimpan di SQLite (HP utama, atau perangkat staf lewat server HP)? */
+export function isLocalDB(): boolean {
+  return Platform.OS !== 'web' || isPhoneClient();
+}
+
 export async function getDB(): Promise<AppDB> {
   if (_db) return _db;
 
@@ -58,6 +63,25 @@ async function initSchema(db: AppDB) {
   try { await db.execAsync('ALTER TABLE bookings ADD COLUMN customer_name TEXT'); } catch {}
   try { await db.execAsync('ALTER TABLE menus ADD COLUMN image_uri TEXT'); } catch {}
   try { await db.execAsync('ALTER TABLE menus ADD COLUMN synced INTEGER NOT NULL DEFAULT 0'); } catch {}
+  // HPP saat terjual — laporan lama tidak berubah bila HPP menu diubah belakangan
+  try { await db.execAsync('ALTER TABLE order_items ADD COLUMN hpp REAL'); } catch {}
+
+  // Akun petugas — hanya di HP utama, tidak disinkron ke Supabase (PIN tidak boleh keluar HP).
+  // /api/query menolak semua akses ke tabel ini dari perangkat staf.
+  await db.execAsync(`CREATE TABLE IF NOT EXISTS staff (id TEXT PRIMARY KEY, name TEXT NOT NULL, pin TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (datetime('now')));`);
+
+  // Audit log — append-only. Trigger menolak UPDATE (kecuali flag synced) dan DELETE,
+  // termasuk dari perangkat staf lewat /api/query dan dari Reset Semua Data.
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, action TEXT NOT NULL, entity TEXT, entity_id TEXT, detail TEXT, actor TEXT, synced INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TRIGGER IF NOT EXISTS audit_log_no_delete BEFORE DELETE ON audit_log
+      BEGIN SELECT RAISE(ABORT, 'audit_log tidak boleh dihapus'); END;
+    CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log
+      WHEN NEW.id IS NOT OLD.id OR NEW.action IS NOT OLD.action OR NEW.entity IS NOT OLD.entity
+        OR NEW.entity_id IS NOT OLD.entity_id OR NEW.detail IS NOT OLD.detail
+        OR NEW.actor IS NOT OLD.actor OR NEW.created_at IS NOT OLD.created_at
+      BEGIN SELECT RAISE(ABORT, 'audit_log tidak boleh diubah'); END;
+  `);
 }
 
 // ─── localStorage fallback (web) ─────────────────────────────────────────────
@@ -84,7 +108,7 @@ function lsUpdate(table: string, updates: Record<string, any>, whereCol: string,
 }
 
 // Tabel yang belum ada di Supabase (fallback ke localStorage)
-const LS_TABLES = new Set<string>();
+const LS_TABLES = new Set<string>(['audit_log']);
 
 // ─── Remote SQLite Adapter (web yang disajikan server HP) ────────────────────
 // Meneruskan SQL apa adanya ke HP via POST /api/query — dieksekusi di SQLite HP.
@@ -138,12 +162,13 @@ class SupabaseDB {
           return d >= start && d <= end;
         });
       }
-      const grouped: Record<string, { tgl: string; revenue: number; jml_order: number }> = {};
+      const grouped: Record<string, { tgl: string; revenue: number; tax: number; jml_order: number }> = {};
       for (const r of rows) {
         const tgl = (r.created_at ?? '').slice(0, 10);
         if (!tgl) continue;
-        if (!grouped[tgl]) grouped[tgl] = { tgl, revenue: 0, jml_order: 0 };
+        if (!grouped[tgl]) grouped[tgl] = { tgl, revenue: 0, tax: 0, jml_order: 0 };
         grouped[tgl].revenue += r.total ?? 0;
+        grouped[tgl].tax += r.tax ?? 0;
         grouped[tgl].jml_order += 1;
       }
       return Object.values(grouped).sort((a, b) => a.tgl.localeCompare(b.tgl)) as T[];
@@ -201,6 +226,27 @@ class SupabaseDB {
       const limitMatch2 = sql.match(/LIMIT\s+(\d+)/i);
       const lim = limitMatch2 ? parseInt(limitMatch2[1]) : 999;
       return Object.values(grouped).sort((a, b) => b.qty - a.qty).slice(0, lim) as T[];
+    }
+
+    // ── Total HPP terjual (SUM qty × menus.hpp) ───────────────────────────────
+    if (upper.includes('M.HPP') && upper.includes('JOIN MENUS') && upper.includes('JOIN ORDERS')) {
+      const [{ data: orderItems }, { data: menus }, { data: orders }] = await Promise.all([
+        supabase.from('order_items').select('*'),
+        supabase.from('menus').select('id, hpp'),
+        supabase.from('orders').select('id, status, created_at'),
+      ]);
+      const hppMap: Record<string, number> = {};
+      for (const m of menus ?? []) hppMap[m.id] = m.hpp ?? 0;
+      const [start, end] = params as string[];
+      const validIds = new Set((orders ?? [])
+        .filter((o) => o.status === 'selesai')
+        .filter((o) => { const d = (o.created_at ?? '').slice(0, 10); return d >= start && d <= end; })
+        .map((o) => o.id));
+      let hpp = 0;
+      for (const oi of orderItems ?? []) {
+        if (validIds.has(oi.order_id)) hpp += (oi.qty ?? 0) * (oi.hpp ?? hppMap[oi.menu_id] ?? 0);
+      }
+      return [{ hpp }] as T[];
     }
 
     // ── Daftar PO + jumlah item (GROUP BY po.id) ─────────────────────────────
@@ -474,6 +520,7 @@ export async function resetAllData(): Promise<void> {
       DELETE FROM ingredients;
       DELETE FROM menus;
       DELETE FROM categories;
+      DELETE FROM staff;
       INSERT OR IGNORE INTO categories (id, name) VALUES
         ('cat-1','Makanan Berat'),('cat-2','Makanan Ringan'),
         ('cat-3','Minuman'),('cat-4','Dessert');

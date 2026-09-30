@@ -11,10 +11,15 @@ export interface AppSettings {
   noTelp: string;
   /** Gambar QRIS statis merchant (data URI). Ditampilkan saat metode bayar QRIS. */
   qrisImage: string;
+  /** PIN owner untuk batal order selesai, ubah pengaturan, reset data. Kosong = belum diatur.
+   *  Hanya ada di HP utama — tidak pernah dikirim ke perangkat staf. */
+  ownerPin: string;
 }
 
 interface SettingsState extends AppSettings {
   loaded: boolean;
+  /** Perangkat staf: apakah HP utama sudah mengatur PIN (PIN-nya sendiri tidak dikirim). */
+  pinSet?: boolean;
   load: () => Promise<void>;
   save: (updates: Partial<AppSettings>) => Promise<void>;
 }
@@ -25,6 +30,7 @@ const DEFAULTS: AppSettings = {
   alamat: '',
   noTelp: '',
   qrisImage: '',
+  ownerPin: '',
 };
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({

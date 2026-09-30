@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import OwnerOnly from '../../components/OwnerOnly';
 import {
   View, Text, ScrollView, StyleSheet, TextInput, TouchableOpacity, Alert,
 } from 'react-native';
@@ -7,7 +8,11 @@ import { Colors, FontSize, Spacing, Radius } from '../../constants/theme';
 
 type Tab = 'hpp' | 'harga' | 'bep';
 
-export default function HPPScreen() {
+export default function HPPScreenGuarded() {
+  return <OwnerOnly><HPPScreen /></OwnerOnly>;
+}
+
+function HPPScreen() {
   const [tab, setTab] = useState<Tab>('hpp');
 
   return (

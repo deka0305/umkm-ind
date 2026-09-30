@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system';
 import { formatRupiah } from './hpp-calculator';
+import { AUDIT_LABEL, IntegrityResult, describeAudit } from './audit';
 
 export interface ReportData {
   period: string;
@@ -8,11 +9,32 @@ export interface ReportData {
   endDate: string;
   totalRevenue: number;
   totalOrder: number;
+  totalTax: number;
+  totalHpp: number;
   namaUsaha: string;
   points: Array<{ tanggal: string; revenue: number; jmlOrder: number }>;
   topMenus: Array<{ name: string; qty: number; revenue: number }>;
   orders: Array<{ id: string; tableNo: string; total: number; status: string; paymentMethod: string; createdAt: string }>;
+  integrity?: IntegrityResult;
 }
+
+/** Baris ringkasan pemeriksaan untuk PDF & CSV. */
+function checkRows(r?: IntegrityResult): Array<[string, string]> {
+  if (!r) return [];
+  return [
+    ['Order dibatalkan', `${r.cancelled.count} (${formatRupiah(r.cancelled.total)})`],
+    ['Dibatalkan setelah dibayar', String(r.cancelled.afterPaid)],
+    ['Batal tanpa catatan', String(r.cancelledNoLog.length)],
+    ['Total order tidak cocok', String(r.mismatched.length)],
+    ['Order pakai diskon', `${r.discounted.count} (${formatRupiah(r.discounted.total)})`],
+    ['Order lama belum selesai', String(r.stalePending.length)],
+    ['PIN owner salah', `${r.pinFails}x`],
+  ];
+}
+
+const auditTime = (iso: string) => (iso ?? '').slice(0, 16).replace('T', ' ');
+// Alasan/nama petugas diketik karyawan — escape sebelum masuk HTML (PDF dibuka di browser)
+const esc = (v: any) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
 const PERIOD_LABEL: Record<string, string> = {
   hari: 'Hari Ini',
@@ -87,6 +109,14 @@ function buildHTML(data: ReportData): string {
     </div>` : ''}
   </div>
 
+  <h2>Pendapatan Bersih</h2>
+  <table>
+    <tr><td>Pendapatan Kotor</td><td>${formatRupiah(data.totalRevenue)}</td></tr>
+    <tr><td>− PPN</td><td>${formatRupiah(data.totalTax)}</td></tr>
+    <tr><td>− HPP (Modal)</td><td>${formatRupiah(data.totalHpp)}</td></tr>
+    <tr><td><b>Laba Bersih</b></td><td><b>${formatRupiah(data.totalRevenue - data.totalTax - data.totalHpp)}</b></td></tr>
+  </table>
+
   <h2>Pendapatan Harian</h2>
   <table>
     <tr><th>Tanggal</th><th>Pendapatan</th><th>Jumlah Order</th></tr>
@@ -104,6 +134,26 @@ function buildHTML(data: ReportData): string {
     <tr><th>ID</th><th>Meja</th><th>Total</th><th>Status</th><th>Pembayaran</th><th>Waktu</th></tr>
     ${orderRows}
   </table>
+
+  ${data.integrity ? `
+  <h2>Pemeriksaan Data</h2>
+  <table>
+    ${checkRows(data.integrity).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}
+  </table>
+
+  <h2>Penjualan per Petugas</h2>
+  <table>
+    <tr><th>Petugas</th><th>Order</th><th>Batal</th><th>Pendapatan</th></tr>
+    ${data.integrity.byActor.map((a) => `<tr><td>${esc(a.actor)}</td><td>${a.orders}</td><td>${a.cancelled}</td><td>${formatRupiah(a.total)}</td></tr>`).join('')}
+  </table>
+
+  <h2>Riwayat Perubahan</h2>
+  <table>
+    <tr><th>Waktu</th><th>Kejadian</th><th>Detail</th><th>Oleh</th></tr>
+    ${data.integrity.changes.length
+      ? data.integrity.changes.map((a) => `<tr><td>${auditTime(a.created_at)}</td><td>${esc(AUDIT_LABEL[a.action] ?? a.action)}</td><td>${esc(describeAudit(a))}</td><td>${esc(a.actor || '-')}</td></tr>`).join('')
+      : `<tr><td colspan="4" class="empty">Tidak ada perubahan</td></tr>`}
+  </table>` : ''}
 
   <p class="footer">Diekspor oleh UMKM Pro</p>
 </body>
@@ -154,6 +204,9 @@ export async function exportToExcel(data: ReportData): Promise<void> {
     ['Periode', label, `${data.startDate} - ${data.endDate}`],
     ['Total Pendapatan', data.totalRevenue],
     ['Total Order Selesai', data.totalOrder],
+    ['PPN', data.totalTax],
+    ['HPP (Modal)', data.totalHpp],
+    ['Laba Bersih', data.totalRevenue - data.totalTax - data.totalHpp],
     [],
     ['PENDAPATAN HARIAN'],
     ['Tanggal', 'Pendapatan (Rp)', 'Jumlah Order'],
@@ -173,6 +226,21 @@ export async function exportToExcel(data: ReportData): Promise<void> {
       o.paymentMethod || '-',
       o.createdAt.slice(0, 16).replace('T', ' '),
     ]),
+    ...(data.integrity ? [
+      [],
+      ['PEMERIKSAAN DATA'],
+      ...checkRows(data.integrity),
+      [],
+      ['PENJUALAN PER PETUGAS'],
+      ['Petugas', 'Order', 'Batal', 'Pendapatan (Rp)'],
+      ...data.integrity.byActor.map((a) => [a.actor, a.orders, a.cancelled, a.total]),
+      [],
+      ['RIWAYAT PERUBAHAN'],
+      ['Waktu', 'Kejadian', 'Detail', 'Oleh'],
+      ...data.integrity.changes.map((a) => [
+        auditTime(a.created_at), AUDIT_LABEL[a.action] ?? a.action, describeAudit(a), a.actor || '-',
+      ]),
+    ] : []),
   ];
 
   const csv = '﻿' + toCSV(rows); // BOM agar Excel baca UTF-8 dengan benar

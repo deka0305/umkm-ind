@@ -109,6 +109,27 @@ CREATE TABLE IF NOT EXISTS po_items (
   price         REAL NOT NULL
 );
 
+-- 11. Audit log — catatan perubahan penting (batal order, ubah harga, dll)
+CREATE TABLE IF NOT EXISTS audit_log (
+  id          TEXT PRIMARY KEY,
+  action      TEXT NOT NULL,
+  entity      TEXT,
+  entity_id   TEXT,
+  detail      TEXT,
+  actor       TEXT,
+  synced      INTEGER NOT NULL DEFAULT 0,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Append-only: UPDATE/DELETE diabaikan diam-diam (RETURN NULL), tetap kompatibel
+-- dengan upsert dari sync HP.
+CREATE OR REPLACE FUNCTION audit_log_readonly() RETURNS trigger AS $$
+BEGIN RETURN NULL; END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS audit_log_readonly_trg ON audit_log;
+CREATE TRIGGER audit_log_readonly_trg BEFORE UPDATE OR DELETE ON audit_log
+  FOR EACH ROW EXECUTE FUNCTION audit_log_readonly();
+
 -- ── Seed data default ─────────────────────────────────────
 INSERT INTO categories (id, name) VALUES
   ('cat-1', 'Makanan Berat'),

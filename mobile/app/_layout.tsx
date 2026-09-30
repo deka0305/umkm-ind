@@ -10,6 +10,7 @@ import { syncAll, pullFromSupabase, startAutoSync, startPushSync, onSyncStatusCh
 import { supabase } from '../lib/supabase';
 import { useMenuStore } from '../stores/menuStore';
 import { useStokStore } from '../stores/stokStore';
+import LoginGate from '../components/LoginGate';
 
 // Alert.alert di react-native-web adalah no-op (`static alert() {}`) — semua pesan
 // error/konfirmasi hilang tanpa jejak di browser. Patch sekali di sini supaya
@@ -139,7 +140,9 @@ export default function RootLayout() {
         <Stack.Screen name="order/cart" options={{ title: 'Order Baru', headerBackTitle: 'Kembali' }} />
         <Stack.Screen name="order/booking" options={{ title: 'Booking', headerBackTitle: 'Kembali' }} />
         <Stack.Screen name="po/index" options={{ title: 'Purchase Order', headerBackTitle: 'Kembali' }} />
+        <Stack.Screen name="petugas" options={{ title: 'Kelola Petugas', headerBackTitle: 'Kembali' }} />
       </Stack>
+      <LoginGate />
     </QueryClientProvider>
   );
 }

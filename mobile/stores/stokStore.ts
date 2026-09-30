@@ -4,6 +4,7 @@ import { getDB, generateId } from '../lib/db';
 import { notifyDataChange } from '../lib/sync';
 import { supabase } from '../lib/supabase';
 import { checkInternetConnection } from '../lib/networkUtils';
+import { logAudit } from '../lib/audit';
 
 export interface Ingredient {
   id: string;
@@ -77,6 +78,13 @@ export const useStokStore = create<StokState>((set, get) => ({
 
   updateIngredient: async (ing) => {
     const db = await getDB();
+    const before = await db.getFirstAsync<any>('SELECT current_stock FROM ingredients WHERE id = ?', ing.id).catch(() => null);
+    if (before && Number(before.current_stock) !== Number(ing.currentStock)) {
+      // Stok diubah langsung tanpa catatan masuk/keluar — tandai untuk owner
+      logAudit('stok_manual', 'bahan', ing.id, {
+        name: ing.name, changes: { stok: [before.current_stock, ing.currentStock] },
+      });
+    }
     await db.runAsync(
       'UPDATE ingredients SET name=?, category=?, current_stock=?, unit=?, min_stock=? WHERE id=?',
       ing.name, ing.category, ing.currentStock, ing.unit, ing.minStock, ing.id

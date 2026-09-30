@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import OwnerOnly from '../../components/OwnerOnly';
+import CancelOrderModal from '../../components/CancelOrderModal';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator, Alert, Platform, Modal,
 } from 'react-native';
@@ -8,6 +10,9 @@ import { supabase } from '../../lib/supabase';
 import { formatRupiah } from '../../lib/hpp-calculator';
 import { exportToPDF, exportToExcel, ReportData } from '../../lib/exportReport';
 import { useSettingsStore } from '../../stores/settingsStore';
+import {
+  AUDIT_LABEL, AuditRow, IntegrityResult, checkIntegrity, describeAudit, hasOwnerPin,
+} from '../../lib/audit';
 import { Colors, FontSize, Spacing, Radius } from '../../constants/theme';
 
 type Period = 'hari' | 'minggu' | 'bulan' | 'tahun';
@@ -24,7 +29,11 @@ const STATUS_COLOR: Record<string, { label: string; color: string; bg: string }>
   batal:    { label: 'Batal',    color: Colors.danger,  bg: Colors.dangerLight  },
 };
 
-export default function LaporanScreen() {
+export default function LaporanScreenGuarded() {
+  return <OwnerOnly><LaporanScreen /></OwnerOnly>;
+}
+
+function LaporanScreen() {
   const { namaUsaha } = useSettingsStore();
   const [period, setPeriod] = useState<Period>('minggu');
   const [orders, setOrders] = useState<OrderRow[]>([]);
@@ -32,11 +41,17 @@ export default function LaporanScreen() {
   const [topMenus, setTopMenus] = useState<TopMenu[]>([]);
   const [totalRevenue, setTotalRevenue] = useState(0);
   const [totalOrder, setTotalOrder] = useState(0);
+  const [totalTax, setTotalTax] = useState(0);
+  const [totalHpp, setTotalHpp] = useState(0);
   const [payBreakdown, setPayBreakdown] = useState<PayBreakdown[]>([]);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
+  const [integrity, setIntegrity] = useState<IntegrityResult | null>(null);
+
+  // ── Pembatalan order ──────────────────────────────────────────────────────
+  const [cancelTarget, setCancelTarget] = useState<OrderRow | null>(null);
 
   useEffect(() => { loadData(); }, [period]);
 
@@ -61,16 +76,28 @@ export default function LaporanScreen() {
       setDateRange({ start: startDate, end: endDate });
 
       const rows = await db.getAllAsync<any>(
-        `SELECT date(created_at) as tgl, COALESCE(SUM(total),0) as revenue, COUNT(*) as jml_order
+        `SELECT date(created_at) as tgl, COALESCE(SUM(total),0) as revenue, COALESCE(SUM(tax),0) as tax, COUNT(*) as jml_order
          FROM orders WHERE status='selesai' AND date(created_at) BETWEEN ? AND ?
          GROUP BY tgl ORDER BY tgl`,
         startDate, endDate
       );
       setPoints(rows.map((r) => ({ tanggal: r.tgl, revenue: r.revenue, jmlOrder: r.jml_order })));
 
-      const summary = rows.reduce((acc, r) => ({ rev: acc.rev + r.revenue, ord: acc.ord + r.jml_order }), { rev: 0, ord: 0 });
+      const summary = rows.reduce((acc, r) => ({ rev: acc.rev + r.revenue, tax: acc.tax + (r.tax ?? 0), ord: acc.ord + r.jml_order }), { rev: 0, tax: 0, ord: 0 });
       setTotalRevenue(summary.rev);
+      setTotalTax(summary.tax);
       setTotalOrder(summary.ord);
+
+      // HPP saat terjual (oi.hpp); order lama sebelum kolom ini ada → HPP menu sekarang
+      const hppRows = await db.getAllAsync<any>(
+        `SELECT COALESCE(SUM(oi.qty * COALESCE(oi.hpp, m.hpp)),0) as hpp
+         FROM order_items oi
+         JOIN menus m ON m.id = oi.menu_id
+         JOIN orders o ON o.id = oi.order_id
+         WHERE o.status='selesai' AND date(o.created_at) BETWEEN ? AND ?`,
+        startDate, endDate
+      );
+      setTotalHpp(hppRows[0]?.hpp ?? 0);
 
       const menuRows = await db.getAllAsync<any>(
         `SELECT m.name, SUM(oi.qty) as qty, SUM(oi.subtotal) as revenue
@@ -102,6 +129,19 @@ export default function LaporanScreen() {
         count: r.count,
         total: r.total,
       })));
+
+      // Query polos tanpa agregat → jalan sama di SQLite, server HP, dan Supabase.
+      // ponytail: scan semua order/item tiap buka laporan; filter periode di SQL kalau data sudah puluhan ribu
+      const [allOrders, allItems, audits, menus] = await Promise.all([
+        db.getAllAsync<any>('SELECT * FROM orders'),
+        db.getAllAsync<any>('SELECT * FROM order_items'),
+        db.getAllAsync<AuditRow>('SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 5000').catch(() => []),
+        db.getAllAsync<any>('SELECT * FROM menus'),
+      ]);
+      setIntegrity(checkIntegrity({
+        orders: allOrders, items: allItems, audits, menus,
+        start: startDate, end: endDate, today: endDate,
+      }));
     } finally {
       setLoading(false);
     }
@@ -114,7 +154,10 @@ export default function LaporanScreen() {
       endDate: dateRange.end,
       totalRevenue,
       totalOrder,
+      totalTax,
+      totalHpp,
       namaUsaha: namaUsaha || 'UMKM Pro',
+      integrity: integrity ?? undefined,
       points,
       topMenus,
       orders,
@@ -160,6 +203,7 @@ export default function LaporanScreen() {
     ]);
   }
 
+  const netIncome = totalRevenue - totalTax - totalHpp;
   const maxRevenue = Math.max(...points.map((p) => p.revenue), 1);
 
   return (
@@ -234,6 +278,22 @@ export default function LaporanScreen() {
             </View>
           </View>
 
+          <View style={s.card}>
+            <Text style={s.cardTitle}>Pendapatan Bersih</Text>
+            <View style={s.netRow}><Text style={s.netLabel}>Pendapatan Kotor</Text><Text style={s.netValue}>{formatRupiah(totalRevenue)}</Text></View>
+            <View style={s.netRow}><Text style={s.netLabel}>− PPN</Text><Text style={s.netValue}>{formatRupiah(totalTax)}</Text></View>
+            <View style={s.netRow}><Text style={s.netLabel}>− HPP (Modal)</Text><Text style={s.netValue}>{formatRupiah(totalHpp)}</Text></View>
+            <View style={[s.netRow, s.netTotalRow]}>
+              <Text style={s.netTotalLabel}>Laba Bersih</Text>
+              <Text style={[s.netTotalValue, netIncome < 0 && { color: Colors.danger }]}>{formatRupiah(netIncome)}</Text>
+            </View>
+            {totalRevenue > 0 && (
+              <Text style={s.netMargin}>Margin {Math.round((netIncome / totalRevenue) * 100)}% dari pendapatan kotor</Text>
+            )}
+          </View>
+
+          {integrity && <IntegrityCard r={integrity} pinSet={hasOwnerPin()} />}
+
           {points.length > 0 && (
             <View style={s.chartCard}>
               <Text style={s.cardTitle}>Grafik Pendapatan</Text>
@@ -307,6 +367,16 @@ export default function LaporanScreen() {
                         <View style={[s.badge, { backgroundColor: cfg.bg }]}>
                           <Text style={[s.badgeText, { color: cfg.color }]}>{cfg.label}</Text>
                         </View>
+                        {integrity?.changedOrderIds.has(order.id) && (
+                          <View style={[s.badge, { backgroundColor: Colors.amberLight }]}>
+                            <Text style={[s.badgeText, { color: Colors.amber }]}>Diubah</Text>
+                          </View>
+                        )}
+                        {(integrity?.mismatched.includes(order.id) || integrity?.cancelledNoLog.includes(order.id)) && (
+                          <View style={[s.badge, { backgroundColor: Colors.dangerLight }]}>
+                            <Text style={[s.badgeText, { color: Colors.danger }]}>⚠ Tidak sesuai</Text>
+                          </View>
+                        )}
                       </View>
                       <Text style={s.orderMeta}>{(order.createdAt).slice(0, 16).replace('T', ' ')} · {order.paymentMethod || '-'}</Text>
                     </View>
@@ -318,10 +388,15 @@ export default function LaporanScreen() {
                             <Ionicons name="checkmark" size={12} color={Colors.white} />
                             <Text style={s.actionText}>Selesai</Text>
                           </TouchableOpacity>
-                          <TouchableOpacity style={s.actionBatal} onPress={() => confirmStatus(order.id, 'batal', 'Batal')}>
+                          <TouchableOpacity style={s.actionBatal} onPress={() => setCancelTarget(order)}>
                             <Ionicons name="close" size={12} color={Colors.white} />
                           </TouchableOpacity>
                         </View>
+                      )}
+                      {order.status === 'selesai' && (
+                        <TouchableOpacity onPress={() => setCancelTarget(order)}>
+                          <Text style={s.cancelPaidLink}>Batalkan</Text>
+                        </TouchableOpacity>
                       )}
                     </View>
                   </View>
@@ -329,9 +404,89 @@ export default function LaporanScreen() {
               })
             )}
           </View>
+          {integrity && integrity.byActor.length > 0 && (
+            <View style={s.card}>
+              <Text style={s.cardTitle}>Penjualan per Petugas</Text>
+              {integrity.byActor.map((a) => (
+                <View key={a.actor} style={s.payRow}>
+                  <View style={s.payLeft}>
+                    <Text style={s.payMethod}>{a.actor}</Text>
+                    <Text style={s.payCount}>
+                      {a.orders} order{a.cancelled ? ` · ${a.cancelled} batal` : ''}
+                    </Text>
+                  </View>
+                  <Text style={s.payTotal}>{formatRupiah(a.total)}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {integrity && integrity.changes.length > 0 && (
+            <View style={s.card}>
+              <Text style={s.cardTitle}>Riwayat Perubahan</Text>
+              {integrity.changes.slice(0, 30).map((a, idx) => (
+                <View key={a.id} style={[s.auditRow, idx === 0 && { borderTopWidth: 0 }]}>
+                  <Text style={s.auditTitle}>{AUDIT_LABEL[a.action] ?? a.action}</Text>
+                  {!!describeAudit(a) && <Text style={s.auditDetail}>{describeAudit(a)}</Text>}
+                  <Text style={s.auditMeta}>{fmtTime(a.created_at)} · {a.actor || '-'}</Text>
+                </View>
+              ))}
+              {integrity.changes.length > 30 && (
+                <Text style={s.empty}>+{integrity.changes.length - 30} lainnya — lihat di Export</Text>
+              )}
+            </View>
+          )}
         </>
       )}
+
+      <CancelOrderModal
+        order={cancelTarget}
+        onClose={() => setCancelTarget(null)}
+        onDone={() => { setCancelTarget(null); loadData(); }}
+      />
     </ScrollView>
+  );
+}
+
+function fmtTime(iso: string) {
+  return (iso ?? '').slice(0, 16).replace('T', ' ');
+}
+
+/** Ringkasan hal yang perlu dicek owner dalam periode ini. */
+function IntegrityCard({ r, pinSet }: { r: IntegrityResult; pinSet: boolean }) {
+  const lines: Array<{ level: 'danger' | 'warn'; text: string }> = [];
+  if (!pinSet) lines.push({ level: 'danger', text: 'PIN owner belum diatur — order yang sudah dibayar bisa dibatalkan siapa saja. Atur di Dashboard → Pengaturan.' });
+  if (r.cancelledNoLog.length) lines.push({ level: 'danger', text: `${r.cancelledNoLog.length} order batal tanpa catatan alasan/petugas` });
+  if (r.mismatched.length) lines.push({ level: 'danger', text: `${r.mismatched.length} order dengan total tidak cocok dengan item-nya` });
+  if (r.cancelled.afterPaid) lines.push({ level: 'danger', text: `${r.cancelled.afterPaid} order dibatalkan setelah dibayar` });
+  if (r.pinFails) lines.push({ level: 'danger', text: `${r.pinFails}x percobaan PIN owner salah` });
+  if (r.cancelled.count) lines.push({ level: 'warn', text: `${r.cancelled.count} order dibatalkan, nilai ${formatRupiah(r.cancelled.total)}` });
+  if (r.discounted.count) lines.push({ level: 'warn', text: `${r.discounted.count} order pakai diskon, total ${formatRupiah(r.discounted.total)}` });
+  if (r.stalePending.length) lines.push({ level: 'warn', text: `${r.stalePending.length} order dari hari sebelumnya belum selesai / belum dibayar` });
+  if (r.menusBelowHpp.length) lines.push({ level: 'warn', text: `Harga jual di bawah HPP: ${r.menusBelowHpp.join(', ')}` });
+  if (r.menusNoHpp.length) lines.push({ level: 'warn', text: `HPP belum diisi (laba bersih tidak akurat): ${r.menusNoHpp.join(', ')}` });
+  const edits = r.changes.filter((a) => ['menu_ubah', 'stok_manual', 'pengaturan_ubah', 'reset_data'].includes(a.action)).length;
+  if (edits) lines.push({ level: 'warn', text: `${edits} perubahan harga/stok/pengaturan — lihat Riwayat Perubahan` });
+
+  return (
+    <View style={[s.card, lines.some((l) => l.level === 'danger') && { borderWidth: 1, borderColor: Colors.danger }]}>
+      <Text style={s.cardTitle}>Perlu Dicek</Text>
+      {lines.length === 0 ? (
+        <View style={s.checkRow}>
+          <Ionicons name="checkmark-circle" size={16} color={Colors.primary} />
+          <Text style={s.checkText}>Semua data sesuai, tidak ada yang janggal</Text>
+        </View>
+      ) : lines.map((l) => (
+        <View key={l.text} style={s.checkRow}>
+          <Ionicons
+            name={l.level === 'danger' ? 'alert-circle' : 'information-circle'}
+            size={16}
+            color={l.level === 'danger' ? Colors.danger : Colors.amber}
+          />
+          <Text style={s.checkText}>{l.text}</Text>
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -389,6 +544,13 @@ const s = StyleSheet.create({
   menuName: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
   menuQty: { fontSize: FontSize.xs, color: Colors.textMuted },
   menuRevenue: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
+  netRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6 },
+  netLabel: { fontSize: FontSize.sm, color: Colors.textSecondary },
+  netValue: { fontSize: FontSize.sm, color: Colors.textPrimary, fontWeight: '600' },
+  netTotalRow: { borderTopWidth: 0.5, borderTopColor: Colors.border, marginTop: 4, paddingTop: 10 },
+  netTotalLabel: { fontSize: FontSize.base, fontWeight: '700', color: Colors.textPrimary },
+  netTotalValue: { fontSize: FontSize.base, fontWeight: '800', color: Colors.primary },
+  netMargin: { fontSize: FontSize.xs, color: Colors.textMuted, marginTop: 4, textAlign: 'right' },
   payRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10, borderTopWidth: 0.5, borderTopColor: Colors.border },
   payLeft: { flex: 1 },
   payMethod: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
@@ -404,5 +566,12 @@ const s = StyleSheet.create({
   badgeText: { fontSize: 10, fontWeight: '700' },
   actionSelesai: { flexDirection: 'row', alignItems: 'center', gap: 2, backgroundColor: Colors.primary, borderRadius: Radius.sm, paddingHorizontal: 8, paddingVertical: 4 },
   actionBatal: { backgroundColor: Colors.danger, borderRadius: Radius.sm, paddingHorizontal: 6, paddingVertical: 4 },
+  cancelPaidLink: { fontSize: 11, color: Colors.danger, fontWeight: '600', textDecorationLine: 'underline' },
+  checkRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', paddingVertical: 5 },
+  checkText: { flex: 1, fontSize: FontSize.sm, color: Colors.textPrimary },
+  auditRow: { paddingVertical: 8, borderTopWidth: 0.5, borderTopColor: Colors.border },
+  auditTitle: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.textPrimary },
+  auditDetail: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2 },
+  auditMeta: { fontSize: FontSize.xs, color: Colors.textMuted, marginTop: 2 },
   actionText: { fontSize: 11, color: Colors.white, fontWeight: '600' },
 });

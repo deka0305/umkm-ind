@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useIsOwner } from '../../stores/sessionStore';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet,
   Modal, TextInput, ActivityIndicator, Alert,
@@ -16,6 +17,7 @@ const STATUS_COLOR: Record<string, string> = {
 
 export default function StokScreen() {
   const { ingredients, loading, fetchIngredients, createIngredient, addMovement } = useStokStore();
+  const isOwner = useIsOwner(); // kasir hanya melihat stok
   const [showAdd, setShowAdd] = useState(false);
   const [showMovement, setShowMovement] = useState<Ingredient | null>(null);
   const [movQty, setMovQty] = useState('');
@@ -68,9 +70,11 @@ export default function StokScreen() {
               <View style={s.cardRight}>
                 <Text style={s.qtyText}>{item.currentStock} {item.unit}</Text>
                 <Text style={s.minText}>Min: {item.minStock}</Text>
-                <TouchableOpacity style={s.movBtn} onPress={() => { setShowMovement(item); setMovType('masuk'); }}>
-                  <Text style={s.movBtnText}>Update Stok</Text>
-                </TouchableOpacity>
+                {isOwner && (
+                  <TouchableOpacity style={s.movBtn} onPress={() => { setShowMovement(item); setMovType('masuk'); }}>
+                    <Text style={s.movBtnText}>Update Stok</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             </View>
           );
@@ -78,9 +82,11 @@ export default function StokScreen() {
         ListEmptyComponent={<Text style={s.empty}>Belum ada bahan baku</Text>}
       />
 
-      <TouchableOpacity style={s.fab} onPress={() => setShowAdd(true)}>
-        <Ionicons name="add" size={28} color={Colors.white} />
-      </TouchableOpacity>
+      {isOwner && (
+        <TouchableOpacity style={s.fab} onPress={() => setShowAdd(true)}>
+          <Ionicons name="add" size={28} color={Colors.white} />
+        </TouchableOpacity>
+      )}
 
       <Modal visible={showAdd} animationType="slide" transparent>
         <View style={s.modalOverlay}>

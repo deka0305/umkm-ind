@@ -142,6 +142,28 @@ Yang perlu diketahui:
 - Versi web (`expo start --web` atau hosting) tetap mengambil data dari Supabase
   langsung — butuh internet. Hanya web yang dibuka dari server HP yang pakai data HP.
 
+### Kontrol owner (anti-kecurangan)
+
+1. **Atur PIN owner** di HP utama: Dashboard → Pengaturan → PIN Owner. Tanpa PIN, siapa pun
+   bisa membatalkan order yang sudah dibayar.
+2. **Tambah petugas**: Pengaturan → Kelola Petugas (nama + PIN 4–6 angka per kasir, HP utama saja).
+   Setelah PIN owner diatur, setiap perangkat wajib login (Owner / petugas). Ganti petugas:
+   tap nama di pojok kanan atas.
+3. PIN owner wajib untuk: batal order yang sudah **Selesai**, simpan Pengaturan, Reset Semua Data.
+4. Setiap pembatalan wajib alasan; tercatat atas nama petugas yang login; stok menu dikembalikan.
+   Kasir membatalkan order apa pun (dari Dashboard) → selalu wajib PIN owner.
+5. Hak akses — **Owner**: penuh. **Kasir**: order, bayar, tambah item, booking, lihat stok.
+   Disembunyikan untuk kasir: Laporan, HPP, pendapatan, kelola menu, update stok, Beli Stok,
+   Pengaturan.
+5. Cek **Laporan → Perlu Dicek**, **Penjualan per Petugas** & **Riwayat Perubahan** (ikut di Export).
+6. Riwayat (`audit_log`) tidak bisa diubah/dihapus — termasuk oleh Reset Semua Data.
+7. HPP disimpan per item saat order dibuat → laba bersih periode lama tidak berubah bila HPP diubah.
+
+> Sekali saja: jalankan ulang `migrations/supabase_schema.sql` di Supabase SQL Editor agar
+> tabel `audit_log` ada di cloud. Tanpa itu app tetap jalan, tapi riwayat tidak tersinkron.
+
+Cek logika: `node scripts/check-audit.js`
+
 ---
 
 ## 6. Perintah Ringkas (cheat sheet)

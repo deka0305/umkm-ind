@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useIsOwner } from '../../stores/sessionStore';
 import {
   View, Text, FlatList, TouchableOpacity, StyleSheet, TextInput,
   ActivityIndicator, Modal, ScrollView, Switch, Alert, Platform, Image,
@@ -49,6 +50,9 @@ export default function KatalogScreen() {
   const [search, setSearch] = useState('');
   const [selectedCat, setSelectedCat] = useState('');
   const [mode, setMode] = useState<Mode>('order');
+  const isOwner = useIsOwner();
+  // Ganti ke kasir saat sedang di mode kelola → kembali ke mode order
+  useEffect(() => { if (!isOwner) setMode('order'); }, [isOwner]);
   const [showForm, setShowForm] = useState(false);
   const [editMenu, setEditMenu] = useState<Menu | null>(null);
   const [form, setForm] = useState({ ...EMPTY_FORM });
@@ -151,16 +155,19 @@ export default function KatalogScreen() {
           )}
         </View>
 
-        <TouchableOpacity
-          style={[styles.modeBtn, mode === 'kelola' && styles.modeBtnActive]}
-          onPress={() => setMode(mode === 'order' ? 'kelola' : 'order')}
-        >
-          <Ionicons
-            name={mode === 'kelola' ? 'storefront' : 'settings-outline'}
-            size={18}
-            color={mode === 'kelola' ? Colors.white : Colors.textSecondary}
-          />
-        </TouchableOpacity>
+        {/* Kelola menu (harga, HPP, stok) khusus owner — kasir hanya memesan */}
+        {isOwner && (
+          <TouchableOpacity
+            style={[styles.modeBtn, mode === 'kelola' && styles.modeBtnActive]}
+            onPress={() => setMode(mode === 'order' ? 'kelola' : 'order')}
+          >
+            <Ionicons
+              name={mode === 'kelola' ? 'storefront' : 'settings-outline'}
+              size={18}
+              color={mode === 'kelola' ? Colors.white : Colors.textSecondary}
+            />
+          </TouchableOpacity>
+        )}
 
         {mode === 'order' && (
           <TouchableOpacity style={styles.cartBtn} onPress={() => router.push('/order/cart')}>

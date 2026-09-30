@@ -6,6 +6,7 @@ import { notifyDataChange } from '../lib/sync';
 import { supabase } from '../lib/supabase';
 import { checkInternetConnection } from '../lib/networkUtils';
 import { uploadMenuImage } from '../lib/imagePicker';
+import { logAudit, diffFields } from '../lib/audit';
 
 function isLocalUri(uri: string): boolean {
   // Hanya URL https:// yang sudah di-upload (Supabase Storage) yang dianggap remote
@@ -132,10 +133,14 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     }
     await get().fetchMenus();
     notifyDataChange();
+    logAudit('menu_baru', 'menu', id, {
+      name: menu.name, sell_price: menu.sellPrice, hpp: menu.hpp, stock: menu.stock,
+    });
   },
 
   updateMenu: async (menu) => {
     const db = await getDB();
+    const before = await db.getFirstAsync<any>('SELECT * FROM menus WHERE id = ?', menu.id).catch(() => null);
 
     if (Platform.OS === 'web' && !isPhoneClient()) {
       // ── Web: update menu dulu TANPA gambar baru → respond langsung ──────────
@@ -195,6 +200,12 @@ export const useMenuStore = create<MenuState>((set, get) => ({
     }
     await get().fetchMenus();
     notifyDataChange();
+    if (before) {
+      const changes = diffFields(before, {
+        name: menu.name, sell_price: menu.sellPrice, hpp: menu.hpp, stock: menu.stock,
+      }, ['name', 'sell_price', 'hpp', 'stock']);
+      if (Object.keys(changes).length) logAudit('menu_ubah', 'menu', menu.id, { name: menu.name, changes });
+    }
   },
 
   toggleActive: async (id) => {
