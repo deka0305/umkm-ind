@@ -162,7 +162,7 @@ Yang perlu diketahui:
 > Sekali saja: jalankan ulang `migrations/supabase_schema.sql` di Supabase SQL Editor agar
 > tabel `audit_log` ada di cloud. Tanpa itu app tetap jalan, tapi riwayat tidak tersinkron.
 
-Cek logika: `node scripts/check-audit.js` dan `node scripts/check-report.js` (laporan + export Excel)
+Cek logika: `node scripts/check-audit.js` , `node scripts/check-report.js` (laporan + export Excel), `node scripts/check-sync.js` (sinkron item order)
 
 ---
 

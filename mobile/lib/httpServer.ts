@@ -190,7 +190,7 @@ async function apiGetMenus(socket: any): Promise<void> {
       db.getAllAsync<any>('SELECT * FROM menus WHERE is_active = 1 ORDER BY name'),
       db.getAllAsync<any>('SELECT * FROM categories ORDER BY name'),
     ]);
-    json(socket, { success: true, data: { menus, categories } });
+    json(socket, { success: true, data: { menus, categories, ppn: useSettingsStore.getState().ppn } });
   } catch (err: any) {
     json(socket, { success: false, error: err.message }, 500);
   }
@@ -284,7 +284,7 @@ async function apiCreateOrder(socket: any, body: string): Promise<void> {
     const now = new Date().toISOString();
     const items: any[] = data.items || [];
     const subtotal = items.reduce((s: number, i: any) => s + (i.price * i.qty), 0);
-    const tax = Math.round(subtotal * 0.11);
+    const tax = Math.round(subtotal * (useSettingsStore.getState().ppn / 100)); // PPN dari pengaturan HP
     const discount = data.discount || 0;
     const total = subtotal + tax - discount;
 
@@ -539,7 +539,7 @@ function getWebUI(): string {
 '<div id="page-st" class="page"><div class="spinner">Memuat...</div></div>' +
 '<div class="toast" id="toast-el"></div>' +
 '<script>' +
-'var menus=[],cats=[],cart=[],curCat="all";' +
+'var menus=[],cats=[],cart=[],curCat="all",ppn=11;' +
 'function fetchT(u,o){var c=new AbortController(),t=setTimeout(function(){c.abort();},10000);return fetch(u,Object.assign({signal:c.signal},o||{})).finally(function(){clearTimeout(t);});}' +
 'function fmt(n){return "Rp "+Number(n||0).toLocaleString("id-ID");}' +
 'function el(id){return document.getElementById(id);}' +
@@ -608,6 +608,7 @@ function getWebUI(): string {
 '    if(!res.success)throw new Error(res.error);' +
 '    menus=res.data.menus||[];' +
 '    cats=res.data.categories||[];' +
+'    if(typeof res.data.ppn==="number")ppn=res.data.ppn;' +
 '    renderCats();renderMenus();' +
 '  }).catch(function(){' +
 '    el("mnu-grid").innerHTML="<div class=\\"spinner\\" style=\\"color:#E24B4A\\">&#10060; Gagal memuat menu.</div>"' +
@@ -654,7 +655,7 @@ function getWebUI(): string {
 '  if(cart.length===0){cb.style.display="none";return;}' +
 '  cb.style.display="block";' +
 '  var sub=cart.reduce(function(s,i){return s+i.price*i.qty;},0);' +
-'  var tax=Math.round(sub*0.11);' +
+'  var tax=Math.round(sub*ppn/100);' +
 '  var tot=sub+tax;' +
 '  el("cart-list").innerHTML=cart.map(function(i){' +
 '    return "<div class=\\"ci\\">"' +
@@ -668,7 +669,7 @@ function getWebUI(): string {
 '  }).join("");' +
 '  el("cart-totals").innerHTML=' +
 '    "<div class=\\"total-line\\"><span>Subtotal</span><span>"+fmt(sub)+"</span></div>"' +
-'    +"<div class=\\"total-line\\"><span>PPN 11%</span><span>"+fmt(tax)+"</span></div>"' +
+'    +"<div class=\\"total-line\\"><span>PPN "+ppn+"%</span><span>"+fmt(tax)+"</span></div>"' +
 '    +"<div class=\\"total-line big\\"><span>Total</span><span style=\\"color:#1D9E75\\">"+fmt(tot)+"</span></div>";' +
 '}' +
 'function submitOrder(){' +

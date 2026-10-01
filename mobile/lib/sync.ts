@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import { getDB } from './db';
 import { supabase } from './supabase';
 import { checkInternetConnection } from './networkUtils';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -60,6 +61,19 @@ export function getSyncStatus(): { status: SyncStatus; lastSync: Date | null } {
 // Hanya push orders pending. Menu & ingredients di-push langsung saat user ubah data
 // (dari store), bukan di sini — agar tidak menimpa perubahan dari web/device lain.
 
+/** Kirim item order ke Supabase. Kolom eksplisit: `hpp` hanya ada di SQLite. Upsert → aman diulang. */
+export async function pushOrderItems(orderIds: string[]): Promise<{ error: any }> {
+  if (orderIds.length === 0) return { error: null };
+  const db = await getDB();
+  const items = (await db.getAllAsync(
+    `SELECT id, order_id, menu_id, qty, price, subtotal FROM order_items WHERE order_id IN (${orderIds.map(() => '?').join(', ')})`,
+    ...orderIds
+  )) as any[];
+  if (items.length === 0) return { error: null };
+  const { error } = await supabase.from('order_items').upsert(items);
+  return { error };
+}
+
 export async function syncPendingOrders(): Promise<void> {
   if (Platform.OS === 'web') return;
   const db = await getDB();
@@ -67,13 +81,31 @@ export async function syncPendingOrders(): Promise<void> {
   for (const order of pending) {
     try {
       const { error } = await supabase.from('orders').upsert(order);
-      if (!error) {
-        await db.runAsync('UPDATE orders SET synced = 1 WHERE id = ?', order.id);
-      }
+      if (error) continue;
+      // Item ikut dikirim — dulu hanya order, jadi order yang dibuat offline sampai
+      // di cloud tanpa item (laporan web: penjualan menu/HPP/laba kurang).
+      const { error: itemErr } = await pushOrderItems([order.id]);
+      if (!itemErr) await db.runAsync('UPDATE orders SET synced = 1 WHERE id = ?', order.id);
     } catch {
       // Skip order ini, coba lagi nanti
     }
   }
+}
+
+/** Perbaikan sekali jalan: order lama yang sudah "synced" tapi item-nya tidak pernah
+ *  sampai ke cloud (bug sebelum pushOrderItems). Kirim ulang semua item lokal. */
+const ITEMS_BACKFILL_KEY = 'umkm_items_backfill_v1';
+export async function backfillOrderItemsOnce(): Promise<void> {
+  if (Platform.OS === 'web') return;
+  try { if (await AsyncStorage.getItem(ITEMS_BACKFILL_KEY)) return; } catch { return; }
+  const db = await getDB();
+  const orders = (await db.getAllAsync('SELECT id FROM orders WHERE synced = 1')) as any[];
+  const ids = orders.map((o) => o.id);
+  for (let i = 0; i < ids.length; i += 200) {
+    const { error } = await pushOrderItems(ids.slice(i, i + 200));
+    if (error) { console.warn('[sync] backfill order_items:', error.message); return; } // coba lagi sync berikutnya
+  }
+  try { await AsyncStorage.setItem(ITEMS_BACKFILL_KEY, new Date().toISOString()); } catch {}
 }
 
 // Dipanggil dari syncAll dan pushPendingAll — hanya push menu yang belum tersinkron
@@ -174,6 +206,21 @@ export async function pullFromSupabase(): Promise<void> {
         o.id, o.customer_id, o.table_no, o.status, o.payment_method,
         o.subtotal, o.tax, o.discount, o.total, o.note,
         o.created_at ?? new Date().toISOString()
+      );
+    }
+  }
+
+  // Item untuk order yang ditarik — order dari web/device lain kalau tidak, di HP
+  // tampak tanpa item (laporan menu/HPP kosong, pemeriksaan menandai "tidak sesuai").
+  // INSERT OR IGNORE: item lokal (yang punya snapshot hpp) tidak ditimpa.
+  const pulledIds = (orders ?? []).map((o) => o.id);
+  if (!orderErr && pulledIds.length > 0) {
+    const { data: pulledItems } = await supabase.from('order_items').select('*').in('order_id', pulledIds);
+    for (const it of pulledItems ?? []) {
+      await db.runAsync(
+        `INSERT OR IGNORE INTO order_items (id, order_id, menu_id, qty, price, subtotal)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        it.id, it.order_id, it.menu_id, it.qty, it.price, it.subtotal
       );
     }
   }
@@ -319,6 +366,7 @@ export async function syncAll(): Promise<boolean> {
     // 2. Push data lokal yang belum tersinkron
     await syncMenusToSupabase();   // retry jika inline sync gagal (misal offline saat create)
     await syncPendingOrders();
+    await backfillOrderItemsOnce();
     await syncPendingBookings();
     await syncPendingStockMovements();
     await syncPendingPurchaseOrders();

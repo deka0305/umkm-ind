@@ -195,10 +195,13 @@ export default function CartScreen() {
               qty: i.qty, price: i.price, subtotal: i.price * i.qty,
             }))
           ),
-        ]).catch(() => {
-          // Gagal → set synced=0 agar periodic sync mengambil alih
-          db.runAsync('UPDATE orders SET synced = 0 WHERE id = ?', newOrderId).catch(() => {});
-        });
+        ])
+          // Supabase mengembalikan error sebagai nilai, bukan exception — cek keduanya
+          .then((res) => { if (res.some((r) => r.error)) throw new Error('supabase'); })
+          .catch(() => {
+            // Gagal → synced=0 agar push sync kirim ulang order + item-nya
+            db.runAsync('UPDATE orders SET synced = 0 WHERE id = ?', newOrderId).catch(() => {});
+          });
       }
     } catch (err) {
       Alert.alert('Gagal menyimpan order', String(err));
@@ -274,9 +277,11 @@ export default function CartScreen() {
           ),
           supabase.from('orders').update({ subtotal: newSubtotal, tax: newTax, total: newTotal })
             .eq('id', editOrderId),
-        ]).catch(() => {
-          db.runAsync('UPDATE orders SET synced = 0 WHERE id = ?', editOrderId).catch(() => {});
-        });
+        ])
+          .then((res) => { if (res.some((r) => r.error)) throw new Error('supabase'); })
+          .catch(() => {
+            db.runAsync('UPDATE orders SET synced = 0 WHERE id = ?', editOrderId).catch(() => {});
+          });
       }
     } catch (err) {
       Alert.alert('Gagal menyimpan', String(err));
